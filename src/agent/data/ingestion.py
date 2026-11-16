@@ -24,7 +24,9 @@ Key Responsibilities of this Module:
 
 from __future__ import annotations
 
+import io
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,47 @@ import duckdb
 import pandas as pd
 import sqlglot
 from sqlglot import exp
+
+# Supported CSV encodings tried in sequence during ingestion fallback.
+# UTF-8-SIG handles files with Byte Order Mark (BOM). CP1252 & Latin-1 preserve
+# Windows/Excel exports with accents, umlauts, and currency symbols.
+SUPPORTED_CSV_ENCODINGS = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
+
+
+def read_csv_with_fallback(
+    source: Path | str | io.BytesIO,
+    **kwargs: Any,
+) -> pd.DataFrame:
+    """Read a CSV source testing UTF-8-SIG, UTF-8, CP1252, and Latin-1 in sequence.
+
+    Preserves original text values and character integrity without silently
+    discarding or ignoring invalid characters.
+
+    Args:
+        source: File path (Path/str) or in-memory binary stream (io.BytesIO).
+        **kwargs: Optional keyword arguments forwarded to `pd.read_csv`.
+
+    Returns:
+        Loaded pandas DataFrame.
+
+    Raises:
+        UnicodeDecodeError: If none of the supported encodings could decode the file.
+        pd.errors.EmptyDataError: If the source contains no columns/data.
+    """
+    last_error: Exception | None = None
+
+    for enc in SUPPORTED_CSV_ENCODINGS:
+        try:
+            if isinstance(source, (io.BytesIO, io.IOBase)):
+                source.seek(0)
+            return pd.read_csv(source, encoding=enc, **kwargs)
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            continue
+
+    if last_error:
+        raise last_error
+    raise ValueError("Failed to decode CSV with supported encodings.")
 
 
 def sanitize_identifier(name: str) -> str:
@@ -46,10 +89,11 @@ def sanitize_identifier(name: str) -> str:
         eliminates quoting discrepancies while keeping SQL queries readable.
 
     Transformation Steps:
-        1. Replace any non-alphanumeric character with an underscore.
-        2. Collapse consecutive underscores to a single underscore.
-        3. Strip leading and trailing underscores, and convert to lowercase.
-        4. If the identifier starts with a number, prepend 'col_' (valid SQL syntax).
+        1. Transliterate accented unicode characters to ASCII (e.g., 'ö' -> 'o', 'é' -> 'e').
+        2. Replace any non-alphanumeric character with an underscore.
+        3. Collapse consecutive underscores to a single underscore.
+        4. Strip leading and trailing underscores, and convert to lowercase.
+        5. If the identifier starts with a number, prepend 'col_' (valid SQL syntax).
 
     Args:
         name: Raw identifier string from user file header.
@@ -57,16 +101,19 @@ def sanitize_identifier(name: str) -> str:
     Returns:
         Clean, SQL-safe snake_case identifier string.
     """
-    # Step 1: Replace any character that is not a letter, digit, or underscore
-    cleaned = re.sub(r"[^0-9a-zA-Z_]+", "_", name.strip())
+    # Step 1: Normalize unicode characters to closest ASCII equivalent (e.g., 'ö' -> 'o')
+    norm = unicodedata.normalize("NFKD", name.strip()).encode("ascii", "ignore").decode("ascii")
 
-    # Step 2: Collapse multiple underscores into one
+    # Step 2: Replace any character that is not a letter, digit, or underscore
+    cleaned = re.sub(r"[^0-9a-zA-Z_]+", "_", norm)
+
+    # Step 3: Collapse multiple underscores into one
     cleaned = re.sub(r"_+", "_", cleaned)
 
-    # Step 3: Trim surrounding underscores and enforce lowercase
+    # Step 4: Trim surrounding underscores and enforce lowercase
     cleaned = cleaned.strip("_").lower()
 
-    # Step 4: Guard against leading numeric digits (e.g., '2024_sales' -> 'col_2024_sales')
+    # Step 5: Guard against leading numeric digits (e.g., '2024_sales' -> 'col_2024_sales')
     if cleaned and cleaned[0].isdigit():
         cleaned = f"col_{cleaned}"
 
@@ -225,8 +272,8 @@ class SessionDatabase:
             raise FileNotFoundError(f"CSV file not found: {path}")
 
         target_name = table_name or path.stem
-        # low_memory=False ensures consistent pandas dtype inference across large chunks
-        df = pd.read_csv(path, low_memory=False)
+        # Read using multi-encoding fallback (UTF-8-SIG, UTF-8, CP1252, Latin-1)
+        df = read_csv_with_fallback(path, low_memory=False)
         return self.register_dataframe(df, target_name, sanitize_columns=sanitize_columns)
 
     def register_excel(

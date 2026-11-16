@@ -11,7 +11,11 @@ Validates:
 import pandas as pd
 import pytest
 
-from src.agent.data.ingestion import SessionDatabase, sanitize_identifier
+from src.agent.data.ingestion import (
+    SessionDatabase,
+    read_csv_with_fallback,
+    sanitize_identifier,
+)
 
 
 def test_sanitize_identifier():
@@ -28,6 +32,36 @@ def test_sanitize_identifier():
     assert sanitize_identifier("Sales ($USD)") == "sales_usd"
     # Leading and trailing underscores collapsed
     assert sanitize_identifier("___Special___") == "special"
+    # Accented/umlaut characters normalized to ASCII
+    assert sanitize_identifier("Björn's Orders") == "bjorn_s_orders"
+    assert sanitize_identifier("Verkäufe_2024") == "verkaufe_2024"
+
+
+def test_read_csv_with_fallback(tmp_path):
+    """Verify reading CSV files encoded in UTF-8, UTF-8-SIG, CP1252, and Latin-1."""
+    import io
+
+    # 1. UTF-8
+    utf8_b = io.BytesIO("col1,col2\nval1,val2\n".encode("utf-8"))
+    df1 = read_csv_with_fallback(utf8_b)
+    assert df1["col1"].iloc[0] == "val1"
+
+    # 2. UTF-8-SIG
+    sig_b = io.BytesIO("\ufeffname,score\nAtul,98\n".encode("utf-8-sig"))
+    df2 = read_csv_with_fallback(sig_b)
+    assert "name" in df2.columns
+    assert df2["name"].iloc[0] == "Atul"
+
+    # 3. CP1252 with euro symbol and umlaut
+    cp_b = io.BytesIO("item,price\nKäse,5€\n".encode("cp1252"))
+    df3 = read_csv_with_fallback(cp_b)
+    assert df3["item"].iloc[0] == "Käse"
+    assert df3["price"].iloc[0] == "5€"
+
+    # 4. Latin-1 with 0xf6
+    latin_b = io.BytesIO(b"city,temp\nM\xfcnchen,18\n")
+    df4 = read_csv_with_fallback(latin_b)
+    assert df4["city"].iloc[0] == "München"
 
 
 def test_session_database_dataframe_registration():
