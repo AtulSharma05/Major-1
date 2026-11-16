@@ -1,0 +1,24 @@
+"""Global pytest configuration and shared fixtures."""
+
+import sys
+from pathlib import Path
+
+import pytest
+
+# Ensure repository root is on sys.path
+REPO_ROOT = Path(__file__).parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+
+@pytest.fixture(scope="session")
+def repo_root() -> Path:
+    """Return the absolute path to repository root."""
+    return REPO_ROOT
+
+
+@pytest.fixture(scope="session")
+def data_dir(repo_root: Path) -> Path:
+    """Return the path to the data directory."""
+    return repo_root / "data"
+
