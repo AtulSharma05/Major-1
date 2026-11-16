@@ -22,7 +22,7 @@ htmlcov/
 # Data files (keep directory, ignore large datasets)
 data/*
 !data/.gitkeep
-!data/sample_test.csv
+!data/sample_*.csv
 
 # Environment & local credentials
 .env
