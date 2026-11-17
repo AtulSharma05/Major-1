@@ -88,6 +88,7 @@ class CodeGenerator:
         profile: TableProfile,
         intent: QuerySpecification | None = None,
         error_feedback: str | None = None,
+        prior_step_context: str | None = None,
     ) -> str:
         """Generate executable DuckDB SQL for an analytical question."""
         prompt = build_sql_prompt(
@@ -95,6 +96,7 @@ class CodeGenerator:
             profile=profile,
             intent=intent,
             error_feedback=error_feedback,
+            prior_step_context=prior_step_context,
         )
         raw_response = self.client.generate(prompt=prompt)
         return extract_sql_from_response(raw_response)

@@ -19,6 +19,9 @@ from src.agent.codegen.generator import CodeGenerator, OllamaClient
 from src.agent.data.ingestion import SessionDatabase
 from src.agent.data.profiling import format_profile_for_prompt, profile_table
 from src.agent.execution.engine import ControlledExecutionEngine
+from src.agent.planning.planner import QueryPlanner
+from src.agent.workflow.graph import build_analytical_graph
+from src.agent.workflow.state import AgentState
 from src.ui.helpers import (
     get_excel_sheet_names,
     get_table_preview_df,
@@ -103,6 +106,7 @@ with st.sidebar:
     st.markdown("Load pre-packaged canonical datasets for fast verification.")
 
     sample_superstore_path = Path("data/sample_superstore.csv")
+    sample_superstore_2_path = Path("data/sample_superstore_2.csv")
     sample_retail_path = Path("data/sample_retail.csv")
 
     if st.button("Load Canonical Samples (Superstore & Retail)", use_container_width=True):
@@ -110,9 +114,12 @@ with st.sidebar:
         if sample_superstore_path.exists():
             t1 = db.register_csv(sample_superstore_path, "sample_superstore")
             loaded.append(t1)
-        if sample_retail_path.exists():
-            t2 = db.register_csv(sample_retail_path, "sample_retail")
+        if sample_superstore_2_path.exists():
+            t2 = db.register_csv(sample_superstore_2_path, "sample_superstore_2")
             loaded.append(t2)
+        if sample_retail_path.exists():
+            t3 = db.register_csv(sample_retail_path, "sample_retail")
+            loaded.append(t3)
 
         if loaded:
             st.success(f"Loaded: {', '.join(f'`{t}`' for t in loaded)}")
@@ -141,7 +148,7 @@ with st.sidebar:
 
 # --- MAIN AREA: Preview, Profiling & Analytical Execution ---
 st.title("📊 Autonomous Analytics Agent — Testing Dashboard")
-st.caption("Phase 2 Data Profiling & Phase 3 Single-Step Analytical Engine")
+st.caption("Phase 2 Data Profiling & Phase 4 Multi-Step Analytical Workflow (LangGraph)")
 
 active_table = st.session_state.get("active_table")
 
@@ -168,101 +175,265 @@ else:
 
     # Tabs for structured inspection
     tab_exec, tab_preview, tab_profile, tab_prompt = st.tabs([
-        "⚡ Single-Step Query Execution (Phase 3)",
+        "⚡ Analytical Workflow (Phase 4 LangGraph)",
         "📋 Data Preview (First 20 Rows)",
         "🔍 Column Profiling & Statistics",
         "🤖 LLM Prompt Schema View",
     ])
 
-    # Tab 1: Single-Step Analytical Query Execution (Phase 3)
+    # Tab 1: Multi-Step & Single-Step Analytical Query Execution (Phase 4)
     with tab_exec:
-        st.subheader("Natural Language Question → DuckDB SQL Execution")
+        st.subheader("Autonomous Multi-Step Query Planning & Workflow Orchestration")
         st.markdown(
-            "Uses **Qwen2.5-Coder 7B** via local Ollama (`localhost:11434`) grounded with the "
-            "active table schema, executed deterministically via `ControlledExecutionEngine`."
+            "Orchestrates the 7-node **LangGraph** analytical lifecycle: "
+            "**Planner** decomposes questions into structured DAGs, "
+            "**Code Generator** synthesizes SQL with **Qwen2.5-Coder 7B**, "
+            "**ControlledExecutionEngine** runs queries safely, and "
+            "**ResultAssembler** merges intermediate findings."
         )
 
         # Quick sample question buttons for Superstore
         if "superstore" in active_table:
             st.caption("💡 Quick test questions for Superstore:")
-            quick_cols = st.columns(4)
-            if quick_cols[0].button("Total Sales (Scalar)", use_container_width=True):
+            st.markdown("**Single-Step Queries:**")
+            quick_cols_s = st.columns(3)
+            if quick_cols_s[0].button("Total Sales (Scalar)", use_container_width=True):
                 st.session_state["current_question"] = "What is the total sales?"
-            if quick_cols[1].button("Sales by Region (Grouped)", use_container_width=True):
+            if quick_cols_s[1].button("Sales by Region (Grouped)", use_container_width=True):
                 st.session_state["current_question"] = "What are the total sales by region?"
-            if quick_cols[2].button("Furniture Sales (Filtered)", use_container_width=True):
-                q = "What is total sales for Furniture category?"
-                st.session_state["current_question"] = q
-            if quick_cols[3].button("Top 3 Sub-Categories", use_container_width=True):
-                q = "What are the top 3 sub-categories by total sales?"
+            if quick_cols_s[2].button("Furniture Sales (Filtered)", use_container_width=True):
+                st.session_state["current_question"] = "What is total sales for Furniture category?"
+
+            st.markdown("**Multi-Step Analytical Queries:**")
+            quick_cols_m = st.columns(4)
+            if quick_cols_m[0].button("Compare 2016 vs 2017", use_container_width=True):
+                st.session_state["current_question"] = "Compare 2016 and 2017 total sales"
+            if quick_cols_m[1].button("Compare Central vs East", use_container_width=True):
+                st.session_state["current_question"] = "Compare Central and East region sales"
+            if quick_cols_m[2].button("2016 vs 2017 by Region", use_container_width=True):
+                st.session_state["current_question"] = "Compare 2016 and 2017 sales by region"
+            if quick_cols_m[3].button("Top Sales & Profit Item", use_container_width=True):
+                q = (
+                    "Which product has the highest sales and which product has the highest "
+                    "profit? They can be the same or different."
+                )
                 st.session_state["current_question"] = q
 
         user_question = st.text_input(
-            "Enter your analytical question:",
+            "Enter your analytical question (single-step or multi-step comparison):",
             value=st.session_state["current_question"],
             key="user_query_input",
         )
 
         col_run, col_timeout = st.columns([4, 1])
         run_btn = col_run.button(
-            "🚀 Generate & Execute SQL",
+            "🚀 Execute Analytical Workflow",
             type="primary",
             use_container_width=True,
         )
         query_timeout = col_timeout.number_input(
-            "Timeout (sec)",
+            "Timeout (sec/step)",
             min_value=1.0,
             max_value=30.0,
-            value=5.0,
+            value=10.0,
         )
 
         if run_btn and user_question:
-            generator = CodeGenerator(client=OllamaClient(model="qwen2.5-coder:7b", timeout=30.0))
-            engine = ControlledExecutionEngine(db=db, default_timeout_seconds=query_timeout)
+            ollama_client = OllamaClient(model="qwen2.5-coder:7b", timeout=45.0)
+            planner = QueryPlanner(client=ollama_client)
+            generator = CodeGenerator(client=ollama_client)
 
-            # Step 1: SQL Code Generation
-            with st.spinner("🤖 Grounding schema & generating SQL with Qwen2.5-Coder 7B..."):
+            with st.spinner("🔄 Running 7-node LangGraph analytical state machine..."):
                 try:
-                    generated_sql = generator.generate_sql(
-                        question=user_question,
-                        profile=profile,
+                    workflow_app = build_analytical_graph(
+                        db=db,
+                        generator=generator,
+                        planner=planner,
+                        default_timeout_seconds=query_timeout,
                     )
+                    initial_state: AgentState = {
+                        "question": user_question,
+                        "session_id": "streamlit_session",
+                        "active_table": active_table,
+                        "schema_profile": profile,
+                        "retry_count": 0,
+                        "max_retries": 2,
+                        "status": "starting",
+                    }
+                    final_state = workflow_app.invoke(initial_state)
                 except ConnectionError as conn_err:
                     st.error(
                         f"❌ Could not connect to local Ollama daemon: {conn_err}\n\n"
                         "Please ensure Ollama is running (`ollama serve`)."
                     )
                     st.stop()
-                except Exception as gen_err:
-                    st.error(f"❌ SQL Generation Error: {gen_err}")
+                except Exception as wf_err:
+                    st.error(f"❌ Workflow Execution Failed: {wf_err}")
                     st.stop()
 
-            st.markdown("#### Generated DuckDB SQL")
-            st.code(generated_sql, language="sql")
+            # Retrieve final state elements
+            plan = final_state.get("plan")
+            step_sql = final_state.get("step_sql", {})
+            step_results = final_state.get("step_results", {})
+            assembled = final_state.get("assembled_result")
+            status = final_state.get("status", "unknown")
 
-            # Step 2: Controlled Execution
-            with st.spinner("⚡ Executing query in DuckDB with AST & timeout protection..."):
-                res = engine.execute(generated_sql, timeout_seconds=query_timeout)
+            # --- Section 1: Workflow Execution Summary ---
+            st.markdown("### 1. Analytical Plan & Execution DAG")
+            if plan:
+                badge_type = (
+                    "Multi-Step Decomposition"
+                    if plan.is_multi_step
+                    else "Single-Step Direct Execution"
+                )
+                p_col1, p_col2, p_col3 = st.columns(3)
+                p_col1.metric("Plan Structure", badge_type)
+                p_col2.metric("Total Steps", len(plan.steps))
+                exec_order_str = " ➔ ".join(f"Step {s}" for s in plan.execution_order)
+                p_col3.metric("Topological Order", exec_order_str)
 
-            # Step 3: Present Execution Results
-            m_stat, m_time, m_rows = st.columns(3)
-            m_stat.metric("Status", "✅ Success" if res.success else "❌ Failed")
-            m_time.metric("Execution Time", f"{res.execution_time_ms:.2f} ms")
-            m_rows.metric("Rows Returned", res.row_count)
-
-            if res.success:
-                if res.is_scalar:
-                    st.success("Calculated Scalar Result:")
-                    val = res.scalar_value
-                    formatted_val = f"{val:,.2f}" if isinstance(val, (int, float)) else str(val)
-                    st.metric(label="Metric Value", value=formatted_val)
-                elif res.is_empty():
-                    st.info("Query executed successfully, but returned 0 rows.")
-                else:
-                    st.success("Query Results Table:")
-                    st.dataframe(res.dataframe, use_container_width=True)
+                # Steps Table
+                steps_display = [
+                    {
+                        "Step ID": f"Step {s.step_id}",
+                        "Sub-Question": s.question,
+                        "Target Table": s.target_table,
+                        "Dependencies": (
+                            ", ".join(f"Step {d}" for d in s.depends_on)
+                            if s.depends_on
+                            else "None (Independent)"
+                        ),
+                    }
+                    for s in plan.steps
+                ]
+                st.dataframe(steps_display, use_container_width=True)
             else:
-                st.error(f"Execution Error ({res.error_type}): {res.error_message}")
+                st.warning("No structured plan was produced.")
+
+            # --- Section 2: Step-by-Step Execution Traces ---
+            st.markdown("### 2. Step-by-Step Execution Traces")
+            if plan and plan.execution_order:
+                for step_id in plan.execution_order:
+                    s_obj = plan.get_step(step_id)
+                    s_desc = s_obj.question if s_obj else f"Step {step_id}"
+                    s_sql = step_sql.get(step_id, "-- No SQL recorded")
+                    s_res = step_results.get(step_id)
+
+                    with st.expander(f"📍 Step {step_id}: {s_desc}", expanded=True):
+                        s_tbl = s_obj.target_table if s_obj else active_table
+                        s_deps = s_obj.depends_on if s_obj else []
+                        st.caption(f"**Target Table:** `{s_tbl}` | **Dependencies:** `{s_deps}`")
+                        st.markdown("**Generated DuckDB SQL:**")
+                        st.code(s_sql, language="sql")
+
+                        if s_res:
+                            r_c1, r_c2, r_c3 = st.columns(3)
+                            stat_label = "✅ Success" if s_res.success else "❌ Failed"
+                            r_c1.metric("Execution Status", stat_label)
+                            r_c2.metric("Latency", f"{s_res.execution_time_ms:.2f} ms")
+                            r_c3.metric("Rows Returned", s_res.row_count)
+
+                            if s_res.success:
+                                if s_res.is_scalar:
+                                    st.markdown("**Step Output (Scalar):**")
+                                    s_val = s_res.scalar_value
+                                    if isinstance(s_val, (int, float)):
+                                        disp_val = f"{s_val:,.2f}"
+                                    else:
+                                        disp_val = str(s_val)
+                                    st.metric(label=f"Step {step_id} Value", value=disp_val)
+                                elif s_res.is_empty():
+                                    st.info("Query succeeded but returned 0 rows.")
+                                else:
+                                    st.markdown("**Step Output (Table Preview):**")
+                                    st.dataframe(s_res.dataframe, use_container_width=True)
+                            else:
+                                err_text = (
+                                    f"Execution Error ({s_res.error_type}): {s_res.error_message}"
+                                )
+                                st.error(err_text)
+                        else:
+                            st.warning("No execution result recorded for this step.")
+
+            # --- Section 3: Final Assembled Analytical Answer ---
+            st.markdown("### 3. Final Assembled Analytical Answer")
+            if assembled:
+                if assembled.all_steps_succeeded:
+                    status_msg = "✅ Workflow Completed Successfully"
+                    if assembled.assembly_notes:
+                        status_msg += f" ({assembled.assembly_notes[0]})"
+                    st.success(status_msg)
+                else:
+                    st.error("❌ Workflow encountered partial or complete step execution errors.")
+
+                # If independent ranking summary metrics are available
+                metrics = assembled.summary_metrics
+                if metrics and "step_1_winner" in metrics and "step_2_winner" in metrics:
+                    st.markdown("#### Independent Objective Winners")
+                    w1 = metrics.get("step_1_winner", "N/A")
+                    w2 = metrics.get("step_2_winner", "N/A")
+                    r_c1, r_c2, r_c3 = st.columns(3)
+                    r_c1.metric("Top Sales Item", w1)
+                    r_c2.metric("Top Profit Item", w2)
+                    match_str = (
+                        "Same Product"
+                        if w1 == w2
+                        else "Different Products"
+                    )
+                    r_c3.metric("Product Alignment", match_str)
+
+                # If scalar comparison summary metrics are available
+                if metrics and "absolute_difference" in metrics:
+                    st.markdown("#### Comparative Summary Metrics")
+                    m_c1, m_c2, m_c3, m_c4 = st.columns(4)
+                    s1_val = metrics.get("step_1_value")
+                    s2_val = metrics.get("step_2_value")
+                    diff_val = metrics.get("absolute_difference")
+                    pct_val = metrics.get("percentage_change")
+
+                    fmt_s1 = f"{s1_val:,.2f}" if isinstance(s1_val, (int, float)) else str(s1_val)
+                    fmt_s2 = f"{s2_val:,.2f}" if isinstance(s2_val, (int, float)) else str(s2_val)
+                    if isinstance(diff_val, (int, float)):
+                        fmt_diff = f"{diff_val:,.2f}"
+                    else:
+                        fmt_diff = str(diff_val)
+
+                    if pct_val is None:
+                        fmt_pct = "N/A (zero baseline)"
+                    elif isinstance(pct_val, (int, float)):
+                        fmt_pct = f"{pct_val:+.2f}%"
+                    else:
+                        fmt_pct = str(pct_val)
+
+                    m_c1.metric("Step 1 Result", fmt_s1)
+                    m_c2.metric("Step 2 Result", fmt_s2)
+                    m_c3.metric("Absolute Variance", fmt_diff)
+                    m_c4.metric("Percentage Change", fmt_pct)
+
+                # Primary tabular or scalar display
+                if assembled.primary_dataframe is not None:
+                    st.markdown("#### Consolidated Result Dataset")
+                    st.dataframe(assembled.primary_dataframe, use_container_width=True)
+                elif assembled.primary_scalar is not None:
+                    st.markdown("#### Consolidated Result Metric")
+                    ps_val = assembled.primary_scalar
+                    fmt_ps = f"{ps_val:,.2f}" if isinstance(ps_val, (int, float)) else str(ps_val)
+                    st.metric(label="Calculated Answer", value=fmt_ps)
+
+                # Assembly Notes
+                if assembled.assembly_notes:
+                    with st.expander("📝 Assembly & Consolidation Notes", expanded=False):
+                        for note in assembled.assembly_notes:
+                            st.markdown(f"- {note}")
+
+            # --- Section 4: Architectural Validation & Graph Status ---
+            st.markdown("---")
+            arch_note = (
+                f"**LangGraph Lifecycle Status:** `{status}` | "
+                "**Active Nodes:** Planner ➔ Code Generator ➔ Controlled Executor "
+                "➔ Result Assembler ➔ Validator (Phase 4 structural pass-through)."
+            )
+            st.caption(arch_note)
 
         st.markdown("---")
         with st.expander("🛠️ Manual SQL Sandbox (Test Direct SQL Execution)"):
@@ -305,6 +476,18 @@ else:
     # Tab 3: Column Profiling & Statistics (Phase 2)
     with tab_profile:
         st.subheader("Column Cardinality, Nulls & Summary Statistics")
+
+        ambig_cols = [
+            c.name for c in profile.columns.values()
+            if c.date_format and "AMBIGUOUS" in c.date_format
+        ]
+        if ambig_cols:
+            st.warning(
+                f"⚠️ Ambiguous date format detected in column(s): {', '.join(ambig_cols)}. "
+                "Ambiguous date formats (e.g. DD/MM/YYYY vs MM/DD/YYYY where both are <= 12) "
+                "cannot be reliably filtered without user clarification."
+            )
+
         disp_df = profile_to_display_df(profile)
         st.dataframe(
             disp_df,

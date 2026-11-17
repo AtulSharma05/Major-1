@@ -178,6 +178,7 @@ def test_profile_to_display_df(data_dir: Path):
     expected_cols = [
         "Column",
         "Type",
+        "Date Format",
         "Null Count",
         "Null %",
         "Distinct",

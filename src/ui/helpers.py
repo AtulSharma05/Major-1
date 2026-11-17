@@ -135,10 +135,12 @@ def profile_to_display_df(profile: TableProfile) -> pd.DataFrame:
             else "-"
         )
         mean_str = f"{col.mean_val:.2f}" if col.mean_val is not None else "-"
+        date_fmt = col.date_format if col.is_temporal and col.date_format else "-"
 
         records.append({
             "Column": col.name,
             "Type": col.duckdb_type,
+            "Date Format": date_fmt,
             "Null Count": col.null_count,
             "Null %": f"{col.null_percentage:.1f}%",
             "Distinct": col.distinct_count,
