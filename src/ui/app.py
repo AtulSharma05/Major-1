@@ -1,11 +1,12 @@
-"""Interactive Streamlit dashboard for Phase 2 data ingestion and profiling testing.
+"""Interactive Streamlit dashboard for Phase 2 & Phase 3 manual testing.
 
 Enables manual verification of:
-    - Multi-dataset CSV/Excel uploads into session-isolated DuckDB.
-    - Table-name collision handling and deduplication.
-    - Safe table preview (first 20 rows without raw SQL).
-    - Comprehensive column profiling (null rates, distinct values, ranges, means, samples).
-    - Token-budgeted schema prompt serialization for LLM grounding.
+    - Multi-dataset CSV/Excel uploads into session-isolated DuckDB (Phase 2).
+    - Table-name collision handling and deduplication (Phase 2).
+    - Safe table preview (first 20 rows without raw SQL) (Phase 2).
+    - Comprehensive column profiling and token-budgeted schema serialization (Phase 2).
+    - Question-to-SQL generation with Qwen2.5-Coder 7B via local Ollama (Phase 3).
+    - Controlled, thread-isolated DuckDB execution with error capture & timeouts (Phase 3).
 """
 
 from __future__ import annotations
@@ -14,8 +15,10 @@ from pathlib import Path
 
 import streamlit as st
 
+from src.agent.codegen.generator import CodeGenerator, OllamaClient
 from src.agent.data.ingestion import SessionDatabase
 from src.agent.data.profiling import format_profile_for_prompt, profile_table
+from src.agent.execution.engine import ControlledExecutionEngine
 from src.ui.helpers import (
     get_excel_sheet_names,
     get_table_preview_df,
@@ -25,7 +28,7 @@ from src.ui.helpers import (
 
 # Page configuration
 st.set_page_config(
-    page_title="Self-Validating Analytics Agent — Phase 2 Data Profiler",
+    page_title="Self-Validating Analytics Agent — Testing Dashboard",
     page_icon="📊",
     layout="wide",
 )
@@ -39,6 +42,10 @@ db: SessionDatabase = st.session_state["db"]
 # Ensure tracking for active table
 if "active_table" not in st.session_state:
     st.session_state["active_table"] = None
+
+# Track user query state
+if "current_question" not in st.session_state:
+    st.session_state["current_question"] = "What is the total sales by region?"
 
 # --- SIDEBAR: Upload & Session Management ---
 with st.sidebar:
@@ -87,6 +94,7 @@ with st.sidebar:
                 if success:
                     st.success(f"Registered table: `{table_or_msg}`")
                     st.session_state["active_table"] = table_or_msg
+                    st.rerun()
                 else:
                     st.error(f"Error ({table_or_msg}): {err_detail}")
 
@@ -131,11 +139,9 @@ with st.sidebar:
         st.info("No tables currently registered in session.")
 
 
-# --- MAIN AREA: Preview & Profiling ---
-st.title("📊 Dataset Profiling & Session Inspector")
-st.caption(
-    "Phase 2 Manual Testing Interface — Self-Validating Autonomous Data Analytics Agent"
-)
+# --- MAIN AREA: Preview, Profiling & Analytical Execution ---
+st.title("📊 Autonomous Analytics Agent — Testing Dashboard")
+st.caption("Phase 2 Data Profiling & Phase 3 Single-Step Analytical Engine")
 
 active_table = st.session_state.get("active_table")
 
@@ -161,13 +167,124 @@ else:
     col3.metric("Total Columns", profile.column_count)
 
     # Tabs for structured inspection
-    tab_preview, tab_profile, tab_prompt = st.tabs([
+    tab_exec, tab_preview, tab_profile, tab_prompt = st.tabs([
+        "⚡ Single-Step Query Execution (Phase 3)",
         "📋 Data Preview (First 20 Rows)",
         "🔍 Column Profiling & Statistics",
         "🤖 LLM Prompt Schema View",
     ])
 
-    # Tab 1: Safe Data Preview
+    # Tab 1: Single-Step Analytical Query Execution (Phase 3)
+    with tab_exec:
+        st.subheader("Natural Language Question → DuckDB SQL Execution")
+        st.markdown(
+            "Uses **Qwen2.5-Coder 7B** via local Ollama (`localhost:11434`) grounded with the "
+            "active table schema, executed deterministically via `ControlledExecutionEngine`."
+        )
+
+        # Quick sample question buttons for Superstore
+        if "superstore" in active_table:
+            st.caption("💡 Quick test questions for Superstore:")
+            quick_cols = st.columns(4)
+            if quick_cols[0].button("Total Sales (Scalar)", use_container_width=True):
+                st.session_state["current_question"] = "What is the total sales?"
+            if quick_cols[1].button("Sales by Region (Grouped)", use_container_width=True):
+                st.session_state["current_question"] = "What are the total sales by region?"
+            if quick_cols[2].button("Furniture Sales (Filtered)", use_container_width=True):
+                q = "What is total sales for Furniture category?"
+                st.session_state["current_question"] = q
+            if quick_cols[3].button("Top 3 Sub-Categories", use_container_width=True):
+                q = "What are the top 3 sub-categories by total sales?"
+                st.session_state["current_question"] = q
+
+        user_question = st.text_input(
+            "Enter your analytical question:",
+            value=st.session_state["current_question"],
+            key="user_query_input",
+        )
+
+        col_run, col_timeout = st.columns([4, 1])
+        run_btn = col_run.button(
+            "🚀 Generate & Execute SQL",
+            type="primary",
+            use_container_width=True,
+        )
+        query_timeout = col_timeout.number_input(
+            "Timeout (sec)",
+            min_value=1.0,
+            max_value=30.0,
+            value=5.0,
+        )
+
+        if run_btn and user_question:
+            generator = CodeGenerator(client=OllamaClient(model="qwen2.5-coder:7b", timeout=30.0))
+            engine = ControlledExecutionEngine(db=db, default_timeout_seconds=query_timeout)
+
+            # Step 1: SQL Code Generation
+            with st.spinner("🤖 Grounding schema & generating SQL with Qwen2.5-Coder 7B..."):
+                try:
+                    generated_sql = generator.generate_sql(
+                        question=user_question,
+                        profile=profile,
+                    )
+                except ConnectionError as conn_err:
+                    st.error(
+                        f"❌ Could not connect to local Ollama daemon: {conn_err}\n\n"
+                        "Please ensure Ollama is running (`ollama serve`)."
+                    )
+                    st.stop()
+                except Exception as gen_err:
+                    st.error(f"❌ SQL Generation Error: {gen_err}")
+                    st.stop()
+
+            st.markdown("#### Generated DuckDB SQL")
+            st.code(generated_sql, language="sql")
+
+            # Step 2: Controlled Execution
+            with st.spinner("⚡ Executing query in DuckDB with AST & timeout protection..."):
+                res = engine.execute(generated_sql, timeout_seconds=query_timeout)
+
+            # Step 3: Present Execution Results
+            m_stat, m_time, m_rows = st.columns(3)
+            m_stat.metric("Status", "✅ Success" if res.success else "❌ Failed")
+            m_time.metric("Execution Time", f"{res.execution_time_ms:.2f} ms")
+            m_rows.metric("Rows Returned", res.row_count)
+
+            if res.success:
+                if res.is_scalar:
+                    st.success("Calculated Scalar Result:")
+                    val = res.scalar_value
+                    formatted_val = f"{val:,.2f}" if isinstance(val, (int, float)) else str(val)
+                    st.metric(label="Metric Value", value=formatted_val)
+                elif res.is_empty():
+                    st.info("Query executed successfully, but returned 0 rows.")
+                else:
+                    st.success("Query Results Table:")
+                    st.dataframe(res.dataframe, use_container_width=True)
+            else:
+                st.error(f"Execution Error ({res.error_type}): {res.error_message}")
+
+        st.markdown("---")
+        with st.expander("🛠️ Manual SQL Sandbox (Test Direct SQL Execution)"):
+            st.caption(
+                "Write and execute custom DuckDB SQL directly through the timeout engine."
+            )
+            default_manual_sql = (
+                f"SELECT region, SUM(sales) AS total_sales "
+                f"FROM {profile.table_name} "
+                "GROUP BY region ORDER BY total_sales DESC"
+            )
+            custom_sql = st.text_area("SQL Query", value=default_manual_sql)
+            if st.button("Run Manual SQL"):
+                engine = ControlledExecutionEngine(db=db, default_timeout_seconds=query_timeout)
+                manual_res = engine.execute(custom_sql, timeout_seconds=query_timeout)
+                if manual_res.success:
+                    st.success(f"Executed in {manual_res.execution_time_ms:.2f} ms:")
+                    st.dataframe(manual_res.dataframe, use_container_width=True)
+                else:
+                    st.error(f"Error ({manual_res.error_type}): {manual_res.error_message}")
+
+    # Tab 2: Safe Data Preview (Phase 2)
     with tab_preview:
         st.subheader("First 20 Rows")
         try:
@@ -185,7 +302,7 @@ else:
             ]
             st.dataframe(map_data, use_container_width=True)
 
-    # Tab 2: Column Profiling & Statistics
+    # Tab 3: Column Profiling & Statistics (Phase 2)
     with tab_profile:
         st.subheader("Column Cardinality, Nulls & Summary Statistics")
         disp_df = profile_to_display_df(profile)
@@ -200,7 +317,7 @@ else:
             },
         )
 
-    # Tab 3: Prompt Schema Export
+    # Tab 4: Prompt Schema Export (Phase 2)
     with tab_prompt:
         st.subheader("Token-Budgeted Schema Representation")
         st.markdown(
@@ -225,4 +342,3 @@ else:
         m2.metric("Character Count", f"{char_count:,}")
 
         st.code(formatted_schema, language="markdown")
-
