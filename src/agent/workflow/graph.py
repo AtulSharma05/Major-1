@@ -22,6 +22,8 @@ from src.agent.data.ingestion import SessionDatabase
 from src.agent.execution.engine import ControlledExecutionEngine
 from src.agent.planning.assembler import ResultAssembler
 from src.agent.planning.planner import QueryPlanner
+from src.agent.validation.contracts import ValidationStatus, WorkflowValidationReport
+from src.agent.validation.execution import ExecutionValidator
 from src.agent.workflow.state import AgentState
 
 
@@ -30,6 +32,7 @@ def build_analytical_graph(
     generator: CodeGenerator | None = None,
     planner: QueryPlanner | None = None,
     assembler: ResultAssembler | None = None,
+    validator: ExecutionValidator | None = None,
     default_timeout_seconds: float = 5.0,
 ):
     """Compile and return the 7-node LangGraph analytical workflow.
@@ -39,6 +42,7 @@ def build_analytical_graph(
         generator: Optional CodeGenerator instance.
         planner: Optional QueryPlanner instance.
         assembler: Optional ResultAssembler instance.
+        validator: Optional ExecutionValidator instance (Phase 5 Layer 1).
         default_timeout_seconds: Query execution timeout limit.
 
     Returns:
@@ -47,6 +51,7 @@ def build_analytical_graph(
     _planner = planner or QueryPlanner()
     _generator = generator or CodeGenerator()
     _assembler = assembler or ResultAssembler()
+    _validator = validator or ExecutionValidator()
     _engine = ControlledExecutionEngine(db, default_timeout_seconds=default_timeout_seconds)
 
     # Node 1: Planner
@@ -120,13 +125,38 @@ def build_analytical_graph(
         plan = state["plan"]
         step_idx = state.get("current_step_index", 0)
         step_id = plan.execution_order[step_idx] if plan and plan.execution_order else 1
+        current_step = plan.get_step(step_id) if plan else None
 
         new_step_results = dict(state.get("step_results", {}))
         new_step_results[step_id] = res
 
+        # Phase 5 Stage 2: Layer 1 Execution Validation
+        existing_report = state.get("validation_report")
+        if isinstance(existing_report, WorkflowValidationReport):
+            val_report = existing_report
+        else:
+            val_report = WorkflowValidationReport()
+
+        prior_attempts = val_report.step_history.get(step_id, [])
+        attempt_number = len(prior_attempts) + 1
+
+        structured_intent = current_step.structured_intent if current_step else None
+
+        step_val = _validator.validate_step(
+            raw_execution_result=res,
+            structured_intent=structured_intent,
+            step=current_step,
+            step_id=step_id,
+            attempt_number=attempt_number,
+            executed_sql=sql,
+        )
+
+        val_report.add_step_attempt(step_val)
+
         return {
             "execution_result": res,
             "step_results": new_step_results,
+            "validation_report": val_report,
         }
 
     # Multi-step iterator node
@@ -146,21 +176,78 @@ def build_analytical_graph(
             "status": "assembled",
         }
 
-    # Node 5: Validator (Phase 4 structural placeholder; 3-layer validation in Phase 5)
+    # Node 5: Validator (Consolidates validation report; Layer 1-3 in Phase 5)
     def validator_node(state: AgentState) -> dict[str, Any]:
         assembled = state.get("assembled_result")
-        all_passed = assembled.all_steps_succeeded if assembled else False
+        val_report = state.get("validation_report")
+
+        # Option B: Differentiated Stage 2 Execution Status
+        # Priority: validation_failed -> inconclusive -> execution_verified -> validated
+        assembly_failed = assembled is None or not assembled.all_steps_succeeded
+        report_failed = (
+            isinstance(val_report, WorkflowValidationReport)
+            and (
+                val_report.workflow_status == ValidationStatus.FAILED
+                or any(
+                    s.status == ValidationStatus.FAILED
+                    or s.execution_result.status == ValidationStatus.FAILED
+                    or not s.execution_result.passed
+                    for s in val_report.latest_step_results.values()
+                )
+            )
+        )
+
+        if assembly_failed or report_failed:
+            status = "validation_failed"
+        elif isinstance(val_report, WorkflowValidationReport) and (
+            val_report.workflow_status == ValidationStatus.INCONCLUSIVE
+            or any(
+                s.status == ValidationStatus.INCONCLUSIVE
+                or s.execution_result.status == ValidationStatus.INCONCLUSIVE
+                for s in val_report.latest_step_results.values()
+            )
+        ):
+            status = "inconclusive"
+        elif (
+            isinstance(val_report, WorkflowValidationReport)
+            and not val_report.all_steps_verified
+            and assembled is not None
+            and assembled.all_steps_succeeded
+        ):
+            status = "execution_verified"
+        elif isinstance(val_report, WorkflowValidationReport) and val_report.all_steps_verified:
+            status = "validated"
+        elif assembled is not None and assembled.all_steps_succeeded:
+            status = "execution_verified"
+        else:
+            status = "validation_failed"
+
         return {
-            "status": "validated" if all_passed else "validation_failed",
-            "validation_report": {"execution_passed": all_passed},
+            "status": status,
+            "validation_report": (
+                val_report if val_report is not None else {"execution_passed": not assembly_failed}
+            ),
         }
 
-    # Node 6: Error Analyzer (Phase 4 structural placeholder; error taxonomy in Phase 5)
+    # Node 6: Error Analyzer (Diagnoses execution/validation failures)
     def error_analyzer_node(state: AgentState) -> dict[str, Any]:
-        res = state.get("execution_result")
-        err_msg = res.error_message if res else "Execution failure"
+        err_msg = state.get("error_feedback")
+        if not err_msg:
+            res = state.get("execution_result")
+            err_msg = res.error_message if res and res.error_message else None
+        if not err_msg:
+            val_report = state.get("validation_report")
+            if isinstance(val_report, WorkflowValidationReport):
+                plan = state.get("plan")
+                step_idx = state.get("current_step_index", 0)
+                step_id = plan.execution_order[step_idx] if plan and plan.execution_order else 1
+                latest = val_report.latest_step_results.get(step_id)
+                if latest and latest.diagnostic:
+                    err_msg = latest.diagnostic.error_summary
+                elif latest and latest.execution_result.message:
+                    err_msg = latest.execution_result.message
         return {
-            "error_feedback": err_msg,
+            "error_feedback": err_msg or "Execution failure",
             "status": "execution_failed",
         }
 
@@ -172,12 +259,30 @@ def build_analytical_graph(
 
     # Conditional Routing Functions
     def route_after_executor(state: AgentState) -> str:
+        plan = state.get("plan")
+        step_idx = state.get("current_step_index", 0)
+        step_id = plan.execution_order[step_idx] if plan and plan.execution_order else 1
+
+        val_report = state.get("validation_report")
+        if (
+            isinstance(val_report, WorkflowValidationReport)
+            and step_id in val_report.latest_step_results
+        ):
+            step_val = val_report.latest_step_results[step_id]
+            route, blocking_reason = _validator.evaluate_routing(
+                plan=plan,
+                step_id=step_id,
+                step_validation=step_val,
+                current_step_index=step_idx,
+            )
+            if blocking_reason:
+                state["error_feedback"] = blocking_reason
+            return route
+
         res = state.get("execution_result")
         if not res or not res.success:
             return "error_analyzer"
 
-        plan = state.get("plan")
-        step_idx = state.get("current_step_index", 0)
         # Advance through all steps in topological execution order
         if plan and step_idx + 1 < len(plan.execution_order):
             return "next_step"

@@ -75,7 +75,7 @@ def test_multi_step_workflow_execution(ollama_available, multi_step_env):
 
     final_state = graph.invoke(initial_state)
 
-    assert final_state["status"] == "validated"
+    assert final_state["status"] in ("inconclusive", "execution_verified")
     assert final_state["plan"] is not None
     assert final_state["plan"].is_multi_step is True
     assert len(final_state["step_results"]) >= 2
@@ -107,7 +107,7 @@ def test_single_step_through_langgraph_workflow(ollama_available, multi_step_env
 
     final_state = graph.invoke(initial_state)
 
-    assert final_state["status"] == "validated"
+    assert final_state["status"] in ("inconclusive", "execution_verified")
     assert final_state["plan"].is_multi_step is False
     assert len(final_state["step_results"]) == 1
 
@@ -135,7 +135,7 @@ def test_independent_ranking_live_decomposition_and_workflow(ollama_available, m
 
     final_state = graph.invoke(initial_state)
 
-    assert final_state["status"] == "validated"
+    assert final_state["status"] in ("inconclusive", "execution_verified")
     plan = final_state["plan"]
     assert plan is not None
     assert plan.is_multi_step is True

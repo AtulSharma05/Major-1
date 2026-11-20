@@ -20,13 +20,18 @@ from src.agent.data.ingestion import SessionDatabase
 from src.agent.data.profiling import format_profile_for_prompt, profile_table
 from src.agent.execution.engine import ControlledExecutionEngine
 from src.agent.planning.planner import QueryPlanner
+from src.agent.validation.contracts import ValidationStatus, WorkflowValidationReport
 from src.agent.workflow.graph import build_analytical_graph
 from src.agent.workflow.state import AgentState
 from src.ui.helpers import (
+    format_step_validation_summary,
     get_excel_sheet_names,
+    get_lifecycle_status_badge,
     get_table_preview_df,
     ingest_uploaded_file,
     profile_to_display_df,
+    serialize_validation_report_for_json,
+    validation_report_to_display_rows,
 )
 
 # Page configuration
@@ -277,6 +282,31 @@ else:
             step_results = final_state.get("step_results", {})
             assembled = final_state.get("assembled_result")
             status = final_state.get("status", "unknown")
+            val_report = final_state.get("validation_report")
+
+            # --- Workflow Lifecycle & Validation Status Banner ---
+            badge_label, badge_icon, alert_type = get_lifecycle_status_badge(status)
+            if alert_type == "success":
+                st.success(f"{badge_icon} **{badge_label}**")
+            elif alert_type == "error":
+                st.error(f"{badge_icon} **{badge_label}**")
+            elif alert_type == "warning":
+                st.warning(f"{badge_icon} **{badge_label}**")
+            else:
+                st.info(f"{badge_icon} **{badge_label}**")
+
+            if isinstance(val_report, WorkflowValidationReport):
+                s_c1, s_c2, s_c3, s_c4 = st.columns(4)
+                s_c1.metric("Lifecycle Status", status.upper())
+                s_c2.metric("Workflow Confidence", val_report.workflow_confidence.value)
+                verified_count = sum(
+                    1
+                    for s in val_report.latest_step_results.values()
+                    if s.execution_result.status == ValidationStatus.VERIFIED
+                )
+                total_step_count = len(val_report.latest_step_results)
+                s_c3.metric("Layer 1 Verified", f"{verified_count} / {total_step_count}")
+                s_c4.metric("Total Attempts", val_report.total_retries + total_step_count)
 
             # --- Section 1: Workflow Execution Summary ---
             st.markdown("### 1. Analytical Plan & Execution DAG")
@@ -355,14 +385,79 @@ else:
                         else:
                             st.warning("No execution result recorded for this step.")
 
+                        # Phase 5 Stage 2 Validation Trace
+                        step_val_info = format_step_validation_summary(val_report, step_id)
+                        if step_val_info:
+                            st.markdown("---")
+                            st.markdown("##### 🛡️ Phase 5 Validation (Layer 1: Execution)")
+                            v_c1, v_c2, v_c3 = st.columns(3)
+                            v_c1.metric("Step Status", step_val_info["step_status"])
+                            v_c2.metric("Confidence", step_val_info["confidence"])
+                            v_c3.metric("Layer 1 Execution", step_val_info["execution_status"])
+
+                            st.caption(
+                                f"**Execution Passed:** "
+                                f"`{'✅ Yes' if step_val_info['execution_passed'] else '❌ No'}` | "
+                                f"**Output Shape:** `{step_val_info['shape_description']}` | "
+                                f"**Schema Match:** `{step_val_info['schema_matched']}` | "
+                                f"**Empty Output:** `{step_val_info['is_empty']}`"
+                            )
+                            if step_val_info["message"]:
+                                st.caption(f"ℹ️ *{step_val_info['message']}*")
+
+                            # Numerical and semantic layer statuses
+                            l_c1, l_c2 = st.columns(2)
+                            l2_note = (
+                                "*(Intent unavailable)*"
+                                if step_val_info["numerical_status"] == "INCONCLUSIVE"
+                                else "*(Pending Stage 3)*"
+                            )
+                            l3_note = (
+                                "*(Intent unavailable)*"
+                                if step_val_info["semantic_status"] == "INCONCLUSIVE"
+                                else "*(Pending Stage 4)*"
+                            )
+                            l_c1.caption(
+                                f"**Layer 2 (Numerical):** "
+                                f"`{step_val_info['numerical_status']}` {l2_note}"
+                            )
+                            l_c2.caption(
+                                f"**Layer 3 (Semantic):** "
+                                f"`{step_val_info['semantic_status']}` {l3_note}"
+                            )
+
+                            if step_val_info["diagnostic"]:
+                                diag = step_val_info["diagnostic"]
+                                st.error(
+                                    f"**Validation Diagnostic ({diag['category']}):** "
+                                    f"{diag['summary']} (Correctable: {diag['correctable']})"
+                                )
+
             # --- Section 3: Final Assembled Analytical Answer ---
             st.markdown("### 3. Final Assembled Analytical Answer")
             if assembled:
-                if assembled.all_steps_succeeded:
-                    status_msg = "✅ Workflow Completed Successfully"
+                if status == "inconclusive":
+                    msg = "⚠️ Execution completed — analytical correctness not established."
                     if assembled.assembly_notes:
-                        status_msg += f" ({assembled.assembly_notes[0]})"
-                    st.success(status_msg)
+                        msg += f" ({assembled.assembly_notes[0]})"
+                    st.warning(msg)
+                elif status == "validation_failed" or not assembled.all_steps_succeeded:
+                    st.error("❌ Workflow encountered execution or validation failures.")
+                elif status == "execution_verified":
+                    msg = "🔵 Execution verified (Layer 1) — analytical correctness unverified."
+                    if assembled.assembly_notes:
+                        msg += f" ({assembled.assembly_notes[0]})"
+                    st.info(msg)
+                elif status == "validated":
+                    msg = "✅ Workflow Completed & Fully Validated Across All Layers"
+                    if assembled.assembly_notes:
+                        msg += f" ({assembled.assembly_notes[0]})"
+                    st.success(msg)
+                elif assembled.all_steps_succeeded:
+                    msg = "Execution completed"
+                    if assembled.assembly_notes:
+                        msg += f" ({assembled.assembly_notes[0]})"
+                    st.info(msg)
                 else:
                     st.error("❌ Workflow encountered partial or complete step execution errors.")
 
@@ -426,14 +521,27 @@ else:
                         for note in assembled.assembly_notes:
                             st.markdown(f"- {note}")
 
-            # --- Section 4: Architectural Validation & Graph Status ---
+            # --- Section 4: Multi-Layer Validation Audit & Traceability ---
             st.markdown("---")
-            arch_note = (
-                f"**LangGraph Lifecycle Status:** `{status}` | "
-                "**Active Nodes:** Planner ➔ Code Generator ➔ Controlled Executor "
-                "➔ Result Assembler ➔ Validator (Phase 4 structural pass-through)."
-            )
-            st.caption(arch_note)
+            st.markdown("### 4. Multi-Layer Validation Audit & Traceability")
+            if isinstance(val_report, WorkflowValidationReport):
+                audit_rows = validation_report_to_display_rows(val_report)
+                if audit_rows:
+                    st.dataframe(audit_rows, use_container_width=True)
+
+                st.caption(
+                    f"**Workflow Status:** `{status}` | "
+                    "**Validation Layers:** Layer 1 (Physical Execution & Shape/Schema) active. "
+                    "Layers 2 & 3: INCONCLUSIVE when intent is missing, or UNVERIFIED."
+                )
+
+                with st.expander("🔍 View Raw WorkflowValidationReport (JSON)", expanded=False):
+                    st.json(serialize_validation_report_for_json(val_report))
+            else:
+                st.caption(
+                    f"**Workflow Status:** `{status}` | "
+                    "Validation report not available for this execution."
+                )
 
         st.markdown("---")
         with st.expander("🛠️ Manual SQL Sandbox (Test Direct SQL Execution)"):
