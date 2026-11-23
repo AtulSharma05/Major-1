@@ -161,6 +161,9 @@ class SessionDatabase:
         # Metadata repository storing column mappings and original schema profiles
         self._table_metadata: dict[str, dict[str, Any]] = {}
 
+        # Source DataFrame repository for independent numerical validation (Stage 3)
+        self._source_dataframes: dict[str, pd.DataFrame] = {}
+
     @property
     def connection(self) -> duckdb.DuckDBPyConnection:
         """Access the underlying DuckDB connection object."""
@@ -239,15 +242,13 @@ class SessionDatabase:
         # We register df_to_load temporarily and immediately create a physical DuckDB table.
         temp_view = f"_temp_{clean_table_name}"
         self._con.register(temp_view, df_to_load)
-        create_sql = (
-            f"CREATE OR REPLACE TABLE {clean_table_name} AS "
-            f"SELECT * FROM {temp_view}"
-        )
+        create_sql = f"CREATE OR REPLACE TABLE {clean_table_name} AS SELECT * FROM {temp_view}"
         self._con.execute(create_sql)
         self._con.unregister(temp_view)
 
-        # Step: Update session allowlist and metadata
+        # Step: Update session allowlist, source DataFrame store, and metadata
         self._registered_tables.add(clean_table_name)
+        self._source_dataframes[clean_table_name] = df_to_load.copy(deep=True)
         self._table_metadata[clean_table_name] = {
             "source": "dataframe",
             "row_count": len(df_to_load),
@@ -255,6 +256,19 @@ class SessionDatabase:
             "columns": list(df_to_load.columns),
         }
         return clean_table_name
+
+    def get_table_dataframe(self, table_name: str) -> pd.DataFrame | None:
+        """Return a defensive deep copy of the source DataFrame for independent validation.
+
+        Args:
+            table_name: Table identifier name.
+
+        Returns:
+            Defensive deep copy of the sanitized Pandas DataFrame, or None if table is unregistered.
+        """
+        clean_name = sanitize_identifier(table_name)
+        df = self._source_dataframes.get(clean_name)
+        return df.copy(deep=True) if df is not None else None
 
     def register_csv(
         self,
@@ -386,5 +400,6 @@ class SessionDatabase:
         return rel.df()
 
     def close(self) -> None:
-        """Gracefully close the in-process DuckDB session."""
+        """Gracefully close the in-process DuckDB session and free memory."""
+        self._source_dataframes.clear()
         self._con.close()

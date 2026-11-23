@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 from src.agent.codegen.generator import CodeGenerator, OllamaClient
@@ -24,6 +25,7 @@ from src.agent.validation.contracts import ValidationStatus, WorkflowValidationR
 from src.agent.workflow.graph import build_analytical_graph
 from src.agent.workflow.state import AgentState
 from src.ui.helpers import (
+    format_numerical_validation_display,
     format_step_validation_summary,
     get_excel_sheet_names,
     get_lifecycle_status_badge,
@@ -179,12 +181,14 @@ else:
     col3.metric("Total Columns", profile.column_count)
 
     # Tabs for structured inspection
-    tab_exec, tab_preview, tab_profile, tab_prompt = st.tabs([
-        "⚡ Analytical Workflow (Phase 4 LangGraph)",
-        "📋 Data Preview (First 20 Rows)",
-        "🔍 Column Profiling & Statistics",
-        "🤖 LLM Prompt Schema View",
-    ])
+    tab_exec, tab_preview, tab_profile, tab_prompt = st.tabs(
+        [
+            "⚡ Analytical Workflow (Phase 4 LangGraph)",
+            "📋 Data Preview (First 20 Rows)",
+            "🔍 Column Profiling & Statistics",
+            "🤖 LLM Prompt Schema View",
+        ]
+    )
 
     # Tab 1: Multi-Step & Single-Step Analytical Query Execution (Phase 4)
     with tab_exec:
@@ -407,24 +411,180 @@ else:
 
                             # Numerical and semantic layer statuses
                             l_c1, l_c2 = st.columns(2)
-                            l2_note = (
-                                "*(Intent unavailable)*"
-                                if step_val_info["numerical_status"] == "INCONCLUSIVE"
-                                else "*(Pending Stage 3)*"
-                            )
+                            num_status = step_val_info["numerical_status"]
+                            if num_status == "VERIFIED":
+                                l2_note = "*(Independently Verified)*"
+                            elif num_status == "FAILED":
+                                l2_note = "*(Verification Failed)*"
+                            elif num_status == "INCONCLUSIVE":
+                                reason = (
+                                    step_val_info.get("numerical_inconclusive_reason")
+                                    or step_val_info.get("numerical_message")
+                                    or "Intent unavailable"
+                                )
+                                l2_note = f"*({reason})*"
+                            else:
+                                l2_note = "*(Unverified)*"
+
                             l3_note = (
                                 "*(Intent unavailable)*"
                                 if step_val_info["semantic_status"] == "INCONCLUSIVE"
                                 else "*(Pending Stage 4)*"
                             )
-                            l_c1.caption(
-                                f"**Layer 2 (Numerical):** "
-                                f"`{step_val_info['numerical_status']}` {l2_note}"
-                            )
+                            l_c1.caption(f"**Layer 2 (Numerical):** `{num_status}` {l2_note}")
                             l_c2.caption(
                                 f"**Layer 3 (Semantic):** "
                                 f"`{step_val_info['semantic_status']}` {l3_note}"
                             )
+
+                            # Detailed Numerical Validation Evidence Display
+                            num_disp = format_numerical_validation_display(step_val_info)
+                            if num_disp["mode"] == "grouped":
+                                with st.expander(
+                                    f"📊 Layer 2 Grouped Comparison Evidence ({num_status})",
+                                    expanded=(num_status == "FAILED"),
+                                ):
+                                    if num_status == "VERIFIED":
+                                        st.success(
+                                            f"✅ **All {num_disp['expected_groups']} grouped "
+                                            "categories and metrics independently verified.**"
+                                        )
+                                        m_c1, m_c2, m_c3, m_c4 = st.columns(4)
+                                        m_c1.metric("Expected Groups", num_disp["expected_groups"])
+                                        m_c2.metric("Actual Groups", num_disp["actual_groups"])
+                                        m_c3.metric("Matched Groups", num_disp["matched_groups"])
+                                        m_c4.metric(
+                                            "Comparisons Passed",
+                                            (
+                                                f"{num_disp['passed_comparisons']} / "
+                                                f"{num_disp['compared_metrics']}"
+                                            ),
+                                        )
+                                        if num_disp["comparison_rows"]:
+                                            st.dataframe(
+                                                pd.DataFrame(num_disp["comparison_rows"]),
+                                                use_container_width=True,
+                                                hide_index=True,
+                                            )
+                                    elif num_status == "FAILED":
+                                        st.error(
+                                            f"❌ **Group Numerical Validation Failed:** "
+                                            f"{num_disp['message']}"
+                                        )
+                                        if num_disp.get("failure_type") == "metric_mismatch":
+                                            f_key_raw = num_disp.get("failing_group_key")
+                                            f_key_str = (
+                                                ", ".join(str(k) for k in f_key_raw)
+                                                if isinstance(f_key_raw, (list, tuple))
+                                                else str(f_key_raw)
+                                            )
+                                            st.warning(
+                                                "**Failure Type:** Metric Value Mismatch | "
+                                                f"**Failing Group:** `{f_key_str}` | "
+                                                f"**Failing Metric:** "
+                                                f"`{num_disp.get('failing_metric')}`"
+                                            )
+                                            s_c1, s_c2, s_c3 = st.columns(3)
+                                            s_c1.metric(
+                                                "DuckDB Output",
+                                                str(step_val_info.get("numerical_duckdb_value")),
+                                            )
+                                            s_c2.metric(
+                                                "Independent Pandas",
+                                                str(
+                                                    step_val_info.get("numerical_independent_value")
+                                                ),
+                                            )
+                                            s_c3.metric(
+                                                "Absolute Difference",
+                                                str(
+                                                    step_val_info.get(
+                                                        "numerical_absolute_difference"
+                                                    )
+                                                ),
+                                            )
+                                        elif num_disp.get("failure_type") == "group_structure":
+                                            exp_cnt = num_disp.get("expected_groups")
+                                            act_cnt = num_disp.get("actual_groups")
+                                            mat_cnt = num_disp.get("matched_groups")
+                                            st.warning(
+                                                "**Failure Type:** Group Structure Failure "
+                                                f"(`{num_disp.get('failure_reason')}`) | "
+                                                f"**Expected:** {exp_cnt} | "
+                                                f"**Actual:** {act_cnt} | "
+                                                f"**Matched:** {mat_cnt}"
+                                            )
+                                            if num_disp.get("missing_group_keys"):
+                                                st.caption(
+                                                    "**Missing Group Keys in DuckDB:** "
+                                                    f"`{num_disp['missing_group_keys']}`"
+                                                )
+                                            if num_disp.get("unexpected_group_keys"):
+                                                st.caption(
+                                                    "**Unexpected Group Keys in DuckDB:** "
+                                                    f"`{num_disp['unexpected_group_keys']}`"
+                                                )
+
+                                        if num_disp["comparison_rows"]:
+                                            st.caption(
+                                                "Partial comparisons evaluated before or at "
+                                                "failure:"
+                                            )
+                                            st.dataframe(
+                                                pd.DataFrame(num_disp["comparison_rows"]),
+                                                use_container_width=True,
+                                                hide_index=True,
+                                            )
+                            elif num_disp["mode"] == "scalar":
+                                with st.expander(
+                                    f"📊 Layer 2 Scalar Comparison Evidence ({num_status})",
+                                    expanded=(num_status == "FAILED"),
+                                ):
+                                    if num_status == "VERIFIED":
+                                        st.success(
+                                            "✅ **Scalar metric independently verified "
+                                            "within tolerance.**"
+                                        )
+                                    elif num_status == "FAILED":
+                                        st.error(
+                                            "❌ **Scalar Validation Failed:** "
+                                            f"{num_disp['message']}"
+                                        )
+                                    s_c1, s_c2, s_c3 = st.columns(3)
+                                    s_c1.metric("DuckDB Output", str(num_disp["duckdb_value"]))
+                                    s_c2.metric(
+                                        "Independent Pandas", str(num_disp["independent_value"])
+                                    )
+                                    abs_val = num_disp["absolute_difference"]
+                                    abs_str = (
+                                        f"{abs_val:.6g}"
+                                        if isinstance(abs_val, float)
+                                        else str(abs_val)
+                                    )
+                                    s_c3.metric("Absolute Difference", abs_str)
+                                    rel_val = num_disp["relative_difference"]
+                                    rel_str = (
+                                        f"{rel_val:.6g}"
+                                        if isinstance(rel_val, float)
+                                        else ("N/A" if rel_val is None else str(rel_val))
+                                    )
+                                    st.caption(
+                                        f"**Tolerances:** Absolute (`atol={num_disp['atol']}`), "
+                                        f"Relative (`rtol={num_disp['rtol']}`) | "
+                                        f"**Relative Difference:** `{rel_str}`"
+                                    )
+                            elif num_status == "INCONCLUSIVE":
+                                reason_msg = (
+                                    num_disp["message"]
+                                    or num_disp["inconclusive_reason"]
+                                    or "Intent unavailable"
+                                )
+                                st.info(f"ℹ️ **Layer 2 (Numerical):** INCONCLUSIVE — {reason_msg}")
+                            elif num_status == "UNVERIFIED":
+                                st.caption(
+                                    f"⚪ **Layer 2 (Numerical):** UNVERIFIED — "
+                                    f"{num_disp['message'] or 'Numerical validation pending'}"
+                                )
 
                             if step_val_info["diagnostic"]:
                                 diag = step_val_info["diagnostic"]
@@ -470,11 +630,7 @@ else:
                     r_c1, r_c2, r_c3 = st.columns(3)
                     r_c1.metric("Top Sales Item", w1)
                     r_c2.metric("Top Profit Item", w2)
-                    match_str = (
-                        "Same Product"
-                        if w1 == w2
-                        else "Different Products"
-                    )
+                    match_str = "Same Product" if w1 == w2 else "Different Products"
                     r_c3.metric("Product Alignment", match_str)
 
                 # If scalar comparison summary metrics are available
@@ -545,9 +701,7 @@ else:
 
         st.markdown("---")
         with st.expander("🛠️ Manual SQL Sandbox (Test Direct SQL Execution)"):
-            st.caption(
-                "Write and execute custom DuckDB SQL directly through the timeout engine."
-            )
+            st.caption("Write and execute custom DuckDB SQL directly through the timeout engine.")
             default_manual_sql = (
                 f"SELECT region, SUM(sales) AS total_sales "
                 f"FROM {profile.table_name} "
@@ -586,7 +740,8 @@ else:
         st.subheader("Column Cardinality, Nulls & Summary Statistics")
 
         ambig_cols = [
-            c.name for c in profile.columns.values()
+            c.name
+            for c in profile.columns.values()
             if c.date_format and "AMBIGUOUS" in c.date_format
         ]
         if ambig_cols:

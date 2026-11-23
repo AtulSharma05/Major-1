@@ -389,9 +389,12 @@ def determine_step_status(
 
     # All three layers verified and raw execution succeeded
     if (
-        execution_res.passed and execution_res.status == ValidationStatus.VERIFIED
-        and numerical_res.passed and numerical_res.status == ValidationStatus.VERIFIED
-        and semantic_res.passed and semantic_res.status == ValidationStatus.VERIFIED
+        execution_res.passed
+        and execution_res.status == ValidationStatus.VERIFIED
+        and numerical_res.passed
+        and numerical_res.status == ValidationStatus.VERIFIED
+        and semantic_res.passed
+        and semantic_res.status == ValidationStatus.VERIFIED
     ):
         return ValidationStatus.VERIFIED
 
@@ -482,7 +485,7 @@ def build_step_validation_result(
         execution_succeeded=exec_succeeded,
         has_meaningful_output=meaningful,
     )
-    overall_passed = (status == ValidationStatus.VERIFIED)
+    overall_passed = status == ValidationStatus.VERIFIED
 
     return StepValidationResult(
         step_id=step_id,
@@ -552,6 +555,30 @@ class WorkflowValidationReport(BaseModel):
         # Retain the last successful raw execution result (Result Availability Policy)
         if result.raw_execution_result and result.raw_execution_result.success:
             self.retained_execution_results[step_id] = result.raw_execution_result
+
+            # Safe history compaction: create a new collection rather than in-place mutation.
+            # Only compact superseded historical attempts that are not the active retained result.
+            current_retained = self.retained_execution_results.get(step_id)
+            history_list = list(self.step_history[step_id])
+            compacted_history: list[StepValidationResult] = []
+
+            for past_attempt in history_list[:-1]:
+                past_raw = past_attempt.raw_execution_result
+                if (
+                    past_raw is not None
+                    and past_raw is not current_retained
+                    and getattr(past_raw, "raw_rows", None) is not None
+                ):
+                    compacted_raw = past_raw.model_copy(update={"raw_rows": None})
+                    compacted_history.append(
+                        past_attempt.model_copy(update={"raw_execution_result": compacted_raw})
+                    )
+                else:
+                    compacted_history.append(past_attempt)
+
+            # Preserve latest attempt intact
+            compacted_history.append(history_list[-1])
+            self.step_history[step_id] = compacted_history
 
         # Recalculate summary metrics and consistency checks
         self.recompute_summary()

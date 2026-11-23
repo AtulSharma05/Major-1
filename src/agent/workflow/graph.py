@@ -22,8 +22,14 @@ from src.agent.data.ingestion import SessionDatabase
 from src.agent.execution.engine import ControlledExecutionEngine
 from src.agent.planning.assembler import ResultAssembler
 from src.agent.planning.planner import QueryPlanner
-from src.agent.validation.contracts import ValidationStatus, WorkflowValidationReport
+from src.agent.validation.contracts import (
+    ConfidenceLevel,
+    ValidationStatus,
+    WorkflowValidationReport,
+    build_step_validation_result,
+)
 from src.agent.validation.execution import ExecutionValidator
+from src.agent.validation.numerical import NumericalValidator
 from src.agent.workflow.state import AgentState
 
 
@@ -33,6 +39,7 @@ def build_analytical_graph(
     planner: QueryPlanner | None = None,
     assembler: ResultAssembler | None = None,
     validator: ExecutionValidator | None = None,
+    numerical_validator: NumericalValidator | None = None,
     default_timeout_seconds: float = 5.0,
 ):
     """Compile and return the 7-node LangGraph analytical workflow.
@@ -43,6 +50,7 @@ def build_analytical_graph(
         planner: Optional QueryPlanner instance.
         assembler: Optional ResultAssembler instance.
         validator: Optional ExecutionValidator instance (Phase 5 Layer 1).
+        numerical_validator: Optional NumericalValidator instance (Phase 5 Layer 2).
         default_timeout_seconds: Query execution timeout limit.
 
     Returns:
@@ -52,6 +60,7 @@ def build_analytical_graph(
     _generator = generator or CodeGenerator()
     _assembler = assembler or ResultAssembler()
     _validator = validator or ExecutionValidator()
+    _num_validator = numerical_validator or NumericalValidator()
     _engine = ControlledExecutionEngine(db, default_timeout_seconds=default_timeout_seconds)
 
     # Node 1: Planner
@@ -142,6 +151,7 @@ def build_analytical_graph(
 
         structured_intent = current_step.structured_intent if current_step else None
 
+        # Phase 5 Layer 1: Physical Execution & Shape/Schema Verification
         step_val = _validator.validate_step(
             raw_execution_result=res,
             structured_intent=structured_intent,
@@ -150,6 +160,41 @@ def build_analytical_graph(
             attempt_number=attempt_number,
             executed_sql=sql,
         )
+
+        # Phase 5 Layer 2: Independent Numerical Validation (Stage 3)
+        if (
+            step_val.numerical_result.status != ValidationStatus.UNVERIFIED
+            and "deferred to Stage 3" not in (step_val.numerical_result.message or "")
+        ):
+            num_res = step_val.numerical_result
+        else:
+            target_table = current_step.target_table if current_step else state.get("active_table")
+            source_df = db.get_table_dataframe(target_table) if target_table else None
+
+            num_res = _num_validator.validate_step(
+                step=current_step,
+                execution_result=res,
+                source_df=source_df,
+                table_profile=state.get("schema_profile"),
+            )
+
+        # Combine Layer 1 and Layer 2 validation evidence into unified StepValidationResult
+        meaningful = (
+            step_val.confidence != ConfidenceLevel.LOW if step_val.confidence is not None else None
+        )
+        step_val = build_step_validation_result(
+            step_id=step_id,
+            attempt_number=attempt_number,
+            execution_res=step_val.execution_result,
+            numerical_res=num_res,
+            semantic_res=step_val.semantic_result,
+            diagnostic=step_val.diagnostic,
+            executed_sql=sql,
+            raw_execution_result=res,
+            has_meaningful_output=meaningful,
+        )
+
+
 
         val_report.add_step_attempt(step_val)
 
@@ -184,16 +229,13 @@ def build_analytical_graph(
         # Option B: Differentiated Stage 2 Execution Status
         # Priority: validation_failed -> inconclusive -> execution_verified -> validated
         assembly_failed = assembled is None or not assembled.all_steps_succeeded
-        report_failed = (
-            isinstance(val_report, WorkflowValidationReport)
-            and (
-                val_report.workflow_status == ValidationStatus.FAILED
-                or any(
-                    s.status == ValidationStatus.FAILED
-                    or s.execution_result.status == ValidationStatus.FAILED
-                    or not s.execution_result.passed
-                    for s in val_report.latest_step_results.values()
-                )
+        report_failed = isinstance(val_report, WorkflowValidationReport) and (
+            val_report.workflow_status == ValidationStatus.FAILED
+            or any(
+                s.status == ValidationStatus.FAILED
+                or s.execution_result.status == ValidationStatus.FAILED
+                or not s.execution_result.passed
+                for s in val_report.latest_step_results.values()
             )
         )
 

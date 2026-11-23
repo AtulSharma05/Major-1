@@ -23,6 +23,8 @@ from src.agent.validation.contracts import (
     build_step_validation_result,
 )
 from src.ui.helpers import (
+    format_numerical_evidence_table,
+    format_numerical_validation_display,
     format_step_validation_summary,
     get_excel_sheet_names,
     get_lifecycle_status_badge,
@@ -518,12 +520,14 @@ def test_helpers_module_exports_and_imports():
 
 def test_serialize_validation_report_for_json_with_dataframe_and_numpy():
     """Verify JSON-safe serialization of report containing DataFrames and NumPy primitives."""
-    df = pd.DataFrame({
-        "region": ["Central", "East"],
-        "sales": [np.float64(100.5), np.float64(200.75)],
-        "int_col": [np.int64(10), np.int64(20)],
-        "timestamp": [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")],
-    })
+    df = pd.DataFrame(
+        {
+            "region": ["Central", "East"],
+            "sales": [np.float64(100.5), np.float64(200.75)],
+            "int_col": [np.int64(10), np.int64(20)],
+            "timestamp": [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")],
+        }
+    )
     raw_res = ExecutionResult(
         success=True,
         query="SELECT region, sales, int_col FROM superstore",
@@ -631,3 +635,280 @@ def test_serialize_validation_report_for_json_edge_cases():
     ser_legacy = serialize_validation_report_for_json(legacy)
     assert ser_legacy["execution_passed"] is True
     assert ser_legacy["details"]["inner_df"]["_type"] == "DataFrame"
+
+
+def test_format_numerical_evidence_table_success():
+    """Verify formatting raw numerical comparisons into display rows."""
+    details = {
+        "comparisons": [
+            {
+                "group_key": ("East",),
+                "metric": "sales",
+                "duckdb_value": 100.0,
+                "independent_value": 100.0,
+                "absolute_difference": 0.0,
+                "relative_difference": 0.0,
+                "passed": True,
+            },
+            {
+                "group_key": ("West",),
+                "metric": "sales",
+                "duckdb_value": 200.0,
+                "independent_value": 200.0,
+                "absolute_difference": 0.0,
+                "relative_difference": 0.0,
+                "passed": True,
+            },
+        ]
+    }
+    rows = format_numerical_evidence_table(details)
+    assert len(rows) == 2
+    assert rows[0]["Group Key"] == "East"
+    assert rows[0]["Metric"] == "sales"
+    assert rows[0]["DuckDB Value"] == "100.0"
+    assert rows[0]["Independent Value"] == "100.0"
+    assert rows[0]["Status"] == "✅ Passed"
+
+    # None and empty inputs
+    assert format_numerical_evidence_table(None) == []
+    assert format_numerical_evidence_table({}) == []
+    assert format_numerical_evidence_table({"comparisons": []}) == []
+
+
+def test_format_numerical_evidence_table_zero_denominator():
+    """Verify relative difference zero denominator formatting."""
+    details = {
+        "comparisons": [
+            {
+                "group_key": ("Central",),
+                "metric": "profit",
+                "duckdb_value": 0.0,
+                "independent_value": 0.0,
+                "absolute_difference": 0.0,
+                "relative_difference": None,
+                "passed": True,
+            }
+        ]
+    }
+    rows = format_numerical_evidence_table(details)
+    assert len(rows) == 1
+    assert rows[0]["Relative Difference"] == "N/A (zero denominator)"
+
+
+def test_format_numerical_validation_display_successful_grouped():
+    """Verify UI parsing of successful grouped query evidence."""
+    info = {
+        "numerical_status": "VERIFIED",
+        "numerical_passed": True,
+        "numerical_message": "All 2 grouped categories and metrics independently verified.",
+        "numerical_details": {
+            "expected_groups": 2,
+            "actual_groups": 2,
+            "matched_groups": 2,
+            "compared_metrics": 2,
+            "passed_comparisons": 2,
+            "comparisons": [
+                {
+                    "group_key": ("East",),
+                    "metric": "sales",
+                    "duckdb_value": 100.0,
+                    "independent_value": 100.0,
+                    "absolute_difference": 0.0,
+                    "relative_difference": 0.0,
+                    "passed": True,
+                }
+            ],
+        },
+    }
+    disp = format_numerical_validation_display(info)
+    assert disp["mode"] == "grouped"
+    assert disp["status"] == "VERIFIED"
+    assert disp["passed"] is True
+    assert disp["expected_groups"] == 2
+    assert disp["matched_groups"] == 2
+    assert len(disp["comparison_rows"]) == 1
+
+
+def test_format_numerical_validation_display_failed_metric_mismatch():
+    """Verify UI parsing of metric value mismatch failure."""
+    info = {
+        "numerical_status": "FAILED",
+        "numerical_passed": False,
+        "numerical_message": "Group metric mismatch",
+        "numerical_duckdb_value": 999.0,
+        "numerical_independent_value": 200.0,
+        "numerical_absolute_difference": 799.0,
+        "numerical_details": {
+            "failure_type": "metric_mismatch",
+            "failing_group_key": ("West",),
+            "failing_metric": "sales",
+            "expected_groups": 2,
+            "actual_groups": 2,
+            "matched_groups": 2,
+            "compared_metrics": 2,
+            "passed_comparisons": 1,
+            "comparisons": [
+                {
+                    "group_key": ("East",),
+                    "metric": "sales",
+                    "duckdb_value": 100.0,
+                    "independent_value": 100.0,
+                    "absolute_difference": 0.0,
+                    "relative_difference": 0.0,
+                    "passed": True,
+                },
+                {
+                    "group_key": ("West",),
+                    "metric": "sales",
+                    "duckdb_value": 999.0,
+                    "independent_value": 200.0,
+                    "absolute_difference": 799.0,
+                    "relative_difference": 3.995,
+                    "passed": False,
+                },
+            ],
+        },
+    }
+    disp = format_numerical_validation_display(info)
+    assert disp["mode"] == "grouped"
+    assert disp["status"] == "FAILED"
+    assert disp["failure_type"] == "metric_mismatch"
+    assert disp["failing_group_key"] == ("West",)
+    assert disp["failing_metric"] == "sales"
+    assert len(disp["comparison_rows"]) == 2
+    assert disp["comparison_rows"][1]["Status"] == "❌ Failed"
+
+
+def test_format_numerical_validation_display_failed_group_structure():
+    """Verify UI parsing of group structure failure (missing groups)."""
+    info = {
+        "numerical_status": "FAILED",
+        "numerical_passed": False,
+        "numerical_message": "Group count mismatch",
+        "numerical_details": {
+            "failure_type": "group_structure",
+            "failure_reason": "group_count_mismatch",
+            "expected_groups": 3,
+            "actual_groups": 2,
+            "matched_groups": 2,
+            "missing_group_keys": (("Central",),),
+            "unexpected_group_keys": (),
+            "compared_metrics": 2,
+            "passed_comparisons": 2,
+            "comparisons": [
+                {
+                    "group_key": ("East",),
+                    "metric": "sales",
+                    "duckdb_value": 100.0,
+                    "independent_value": 100.0,
+                    "absolute_difference": 0.0,
+                    "relative_difference": 0.0,
+                    "passed": True,
+                }
+            ],
+        },
+    }
+    disp = format_numerical_validation_display(info)
+    assert disp["mode"] == "grouped"
+    assert disp["failure_type"] == "group_structure"
+    assert disp["failure_reason"] == "group_count_mismatch"
+    assert disp["missing_group_keys"] == (("Central",),)
+    assert len(disp["comparison_rows"]) == 1
+
+
+def test_format_numerical_validation_display_scalar_evidence():
+    """Verify UI parsing of scalar numerical evidence."""
+    info = {
+        "numerical_status": "VERIFIED",
+        "numerical_passed": True,
+        "is_scalar": True,
+        "numerical_duckdb_value": 5000.0,
+        "numerical_independent_value": 5000.0,
+        "numerical_absolute_difference": 0.0,
+        "numerical_relative_difference": 0.0,
+        "numerical_atol": 1e-4,
+        "numerical_rtol": 1e-4,
+        "numerical_details": {},
+    }
+    disp = format_numerical_validation_display(info)
+    assert disp["mode"] == "scalar"
+    assert disp["status"] == "VERIFIED"
+    assert disp["duckdb_value"] == 5000.0
+    assert disp["independent_value"] == 5000.0
+    assert disp["absolute_difference"] == 0.0
+
+
+def test_format_numerical_validation_display_inconclusive_and_none():
+    """Verify that inconclusive and missing numerical details do not manufacture evidence."""
+    info = {
+        "numerical_status": "INCONCLUSIVE",
+        "numerical_passed": False,
+        "numerical_message": "QuerySpecification unavailable",
+        "numerical_inconclusive_reason": "intent_missing",
+        "numerical_details": {},
+    }
+    disp = format_numerical_validation_display(info)
+    assert disp["mode"] == "none"
+    assert disp["status"] == "INCONCLUSIVE"
+    assert disp["inconclusive_reason"] == "intent_missing"
+
+    # None input
+    assert format_numerical_validation_display(None) == {"mode": "none", "status": "UNVERIFIED"}
+
+
+def test_format_step_validation_summary_extracts_numerical_fields():
+    """Verify format_step_validation_summary extracts numerical details from report."""
+    exec_res = ExecutionResult(success=True, query="SELECT 1", raw_rows=[(100.0,)])
+    num_res = NumericalValidationResult(
+        layer_name="Layer 2: Numerical",
+        passed=True,
+        status=ValidationStatus.VERIFIED,
+        message="All 2 grouped categories and metrics independently verified.",
+        compared_rows=2,
+        details={
+            "expected_groups": 2,
+            "actual_groups": 2,
+            "matched_groups": 2,
+            "compared_metrics": 2,
+            "passed_comparisons": 2,
+            "comparisons": [
+                {
+                    "group_key": ("East",),
+                    "metric": "sales",
+                    "duckdb_value": 100.0,
+                    "independent_value": 100.0,
+                    "absolute_difference": 0.0,
+                    "relative_difference": 0.0,
+                    "passed": True,
+                }
+            ],
+        },
+    )
+    step_val = build_step_validation_result(
+        step_id=1,
+        attempt_number=1,
+        execution_res=ExecutionValidationResult(
+            passed=True, status=ValidationStatus.VERIFIED, message="ok"
+        ),
+        numerical_res=num_res,
+        semantic_res=SemanticValidationResult(
+            layer_name="sem", passed=False, status=ValidationStatus.UNVERIFIED, message="unv"
+        ),
+        raw_execution_result=exec_res,
+    )
+    report = WorkflowValidationReport(total_steps=1)
+    report.add_step_attempt(step_val)
+
+    summary = format_step_validation_summary(report, 1)
+    assert summary is not None
+    assert summary["numerical_status"] == "VERIFIED"
+    assert summary["numerical_passed"] is True
+    assert summary["numerical_details"]["expected_groups"] == 2
+    assert len(summary["numerical_details"]["comparisons"]) == 1
+
+    # Ensure clean serialization through serialize_validation_report_for_json
+    serialized = serialize_validation_report_for_json(summary)
+    json_str = json.dumps(serialized)
+    assert isinstance(json_str, str)
+    parsed = json.loads(json_str)
+    assert parsed["numerical_details"]["expected_groups"] == 2

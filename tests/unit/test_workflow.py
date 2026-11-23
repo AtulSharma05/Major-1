@@ -63,9 +63,11 @@ def test_workflow_compilation(workflow_setup):
 def test_workflow_single_step_execution(workflow_setup):
     """Verify single-step flow: Planner -> CodeGen -> Executor -> Assembler -> Validator."""
     db, profile = workflow_setup
-    mock_gen = MockCodeGenerator({
-        "What is total sales?": "SELECT SUM(sales) AS total_sales FROM superstore",
-    })
+    mock_gen = MockCodeGenerator(
+        {
+            "What is total sales?": "SELECT SUM(sales) AS total_sales FROM superstore",
+        }
+    )
     graph = build_analytical_graph(db=db, generator=mock_gen)
 
     initial_state: AgentState = {
@@ -77,8 +79,8 @@ def test_workflow_single_step_execution(workflow_setup):
 
     final_state = graph.invoke(initial_state)
 
-    # In Option C / Option B semantics, missing structured_intent yields INCONCLUSIVE
-    assert final_state["status"] == "inconclusive"
+    # In Stage 3.1 semantics, structured_intent is extracted, verifying Layer 1 and Layer 2
+    assert final_state["status"] == "execution_verified"
     assert final_state["plan"] is not None
     assert final_state["plan"].is_multi_step is False
     assert final_state["assembled_result"] is not None
@@ -86,7 +88,9 @@ def test_workflow_single_step_execution(workflow_setup):
     assert final_state["assembled_result"].primary_scalar is not None
     assert final_state["assembled_result"].primary_scalar > 0
     assert final_state["validation_report"] is not None
-    assert final_state["validation_report"].workflow_status == ValidationStatus.INCONCLUSIVE
+    latest = final_state["validation_report"].latest_step_results[1]
+    assert latest.execution_result.status == ValidationStatus.VERIFIED
+    assert latest.numerical_result.status == ValidationStatus.VERIFIED
 
 
 def test_workflow_multi_step_loop_execution(workflow_setup):
@@ -106,10 +110,12 @@ def test_workflow_multi_step_loop_execution(workflow_setup):
         def plan(self, *args, **kwargs):
             return mock_plan
 
-    mock_gen = MockCodeGenerator({
-        "Sales 2016": "SELECT SUM(sales) FROM superstore WHERE order_date < '2017-01-01'",
-        "Sales 2017": "SELECT SUM(sales) FROM superstore WHERE order_date >= '2017-01-01'",
-    })
+    mock_gen = MockCodeGenerator(
+        {
+            "Sales 2016": "SELECT SUM(sales) FROM superstore WHERE order_date < '2017-01-01'",
+            "Sales 2017": "SELECT SUM(sales) FROM superstore WHERE order_date >= '2017-01-01'",
+        }
+    )
 
     graph = build_analytical_graph(db=db, generator=mock_gen, planner=MockPlanner())
 
@@ -185,9 +191,11 @@ def test_workflow_execution_verified_status(workflow_setup):
         def plan(self, *args, **kwargs):
             return mock_plan
 
-    mock_gen = MockCodeGenerator({
-        "What is total sales?": "SELECT SUM(sales) AS total_sales FROM superstore",
-    })
+    mock_gen = MockCodeGenerator(
+        {
+            "What is total sales?": "SELECT SUM(sales) AS total_sales FROM superstore",
+        }
+    )
 
     graph = build_analytical_graph(db=db, generator=mock_gen, planner=MockPlanner())
 
@@ -200,7 +208,7 @@ def test_workflow_execution_verified_status(workflow_setup):
 
     final_state = graph.invoke(initial_state)
 
-    # In Stage 2, Layer 1 is verified with schema match, while Layers 2/3 remain UNVERIFIED
+    # In Stage 3, Layer 1 & 2 are verified, while Layer 3 remains UNVERIFIED
     assert final_state["status"] == "execution_verified"
     val_report: WorkflowValidationReport = final_state["validation_report"]
     assert val_report is not None
@@ -209,7 +217,7 @@ def test_workflow_execution_verified_status(workflow_setup):
     assert step_val.execution_result.passed is True
     assert step_val.execution_result.status == ValidationStatus.VERIFIED
     assert step_val.execution_result.schema_matched is True
-    assert step_val.numerical_result.status == ValidationStatus.UNVERIFIED
+    assert step_val.numerical_result.status == ValidationStatus.VERIFIED
     assert step_val.semantic_result.status == ValidationStatus.UNVERIFIED
 
 
@@ -250,9 +258,11 @@ def test_workflow_validated_status(workflow_setup):
         def evaluate_routing(self, **kwargs):
             return "assembler", None
 
-    mock_gen = MockCodeGenerator({
-        "What is total sales?": "SELECT SUM(sales) AS total_sales FROM superstore",
-    })
+    mock_gen = MockCodeGenerator(
+        {
+            "What is total sales?": "SELECT SUM(sales) AS total_sales FROM superstore",
+        }
+    )
 
     graph = build_analytical_graph(
         db=db,
@@ -305,9 +315,11 @@ def test_workflow_validation_failed_status(workflow_setup):
             # Allow step to reach assembler/validator to test validator_node failure status
             return "assembler", "Validation failed"
 
-    mock_gen = MockCodeGenerator({
-        "What is total sales?": "SELECT SUM(sales) AS total_sales FROM superstore",
-    })
+    mock_gen = MockCodeGenerator(
+        {
+            "What is total sales?": "SELECT SUM(sales) AS total_sales FROM superstore",
+        }
+    )
 
     graph = build_analytical_graph(
         db=db,

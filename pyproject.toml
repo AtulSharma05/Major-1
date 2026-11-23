@@ -9,7 +9,6 @@ description = "A Self-Validating Autonomous Data Analytics Agent for Diagnostic 
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-    { name = "Parth Tiwari" },
     { name = "Atul Sharma" }
 ]
 dependencies = [

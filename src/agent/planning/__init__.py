@@ -8,6 +8,7 @@ from src.agent.planning.intent import (
     QuerySpecification,
     TimeConstraint,
 )
+from src.agent.planning.intent_parser import IntentParser
 from src.agent.planning.planner import (
     AnalyticalPlan,
     PlanStep,
@@ -20,6 +21,7 @@ __all__ = [
     "AnalyticalPlan",
     "AssembledResult",
     "FilterSpec",
+    "IntentParser",
     "MetricSpec",
     "PlanStep",
     "QueryPlanner",

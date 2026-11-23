@@ -25,9 +25,11 @@ from pydantic import BaseModel, Field
 
 from src.agent.data.profiling import TableProfile, format_profile_for_prompt
 from src.agent.planning.intent import QuerySpecification
+from src.agent.planning.intent_parser import IntentParser
 
 if TYPE_CHECKING:
     from src.agent.codegen.generator import OllamaClient
+    from src.agent.data.ingestion import SessionDatabase
 
 
 class PlanStep(BaseModel):
@@ -205,9 +207,36 @@ Output ONLY the JSON object. Do not include markdown preamble, explanations, or 
 class QueryPlanner:
     """Plans and decomposes analytical questions into executable steps."""
 
-    def __init__(self, client: OllamaClient | None = None):
-        """Initialize the query planner with an optional Ollama LLM client."""
+    def __init__(
+        self,
+        client: OllamaClient | None = None,
+        db: SessionDatabase | None = None,
+    ):
+        """Initialize the query planner with optional Ollama LLM client and SessionDatabase."""
         self.client = client
+        self.db = db
+        self.intent_parser = IntentParser(client=client)
+        self._profile_cache: dict[str, TableProfile] = {}
+
+    def _resolve_table_profile(
+        self, target_table: str, default_profile: TableProfile | None
+    ) -> TableProfile | None:
+        """Resolve the schema profile corresponding to the step target_table."""
+        clean_target = target_table.lower().strip()
+        if default_profile and clean_target == default_profile.table_name.lower().strip():
+            return default_profile
+
+        if clean_target in self._profile_cache:
+            return self._profile_cache[clean_target]
+
+        if self.db and self.db.is_table_allowed(clean_target):
+            from src.agent.data.profiling import profile_table
+
+            prof = profile_table(self.db, clean_target)
+            self._profile_cache[clean_target] = prof
+            return prof
+
+        return None
 
     def plan(
         self,
@@ -235,11 +264,17 @@ class QueryPlanner:
         # Step 1: Pre-classification heuristic
         # If question is clearly simple, avoid LLM latency and generate 1-step plan immediately
         if self._is_definitely_single_step(clean_question):
+            step_prof = self._resolve_table_profile(active_table, profile)
+            intent = (
+                self.intent_parser.parse(clean_question, active_table, step_prof)
+                if step_prof
+                else None
+            )
             step = PlanStep(
                 step_id=1,
                 question=clean_question,
                 target_table=active_table,
-                structured_intent=None,
+                structured_intent=intent,
                 depends_on=[],
             )
             return AnalyticalPlan(
@@ -257,17 +292,23 @@ class QueryPlanner:
                 # Fall back to heuristic decomposition or single-step plan
                 pass
 
-        # Step 3: Heuristic multi-step decomposition for independent rankings / comparisons
+        # Step 3: Heuristic multi-step decomposition for independent rankings
         heuristic_plan = self._detect_independent_rankings(clean_question, active_table, profile)
         if heuristic_plan:
             return heuristic_plan
 
         # Step 4: Default fallback: treat as single-step plan
+        step_prof = self._resolve_table_profile(active_table, profile)
+        intent = (
+            self.intent_parser.parse(clean_question, active_table, step_prof)
+            if step_prof
+            else None
+        )
         step = PlanStep(
             step_id=1,
             question=clean_question,
             target_table=active_table,
-            structured_intent=None,
+            structured_intent=intent,
             depends_on=[],
         )
         return AnalyticalPlan(
@@ -345,16 +386,22 @@ class QueryPlanner:
                         entity = c
                         break
 
+        q1 = f"Find the {entity} with the highest SUM(sales)"
+        q2 = f"Find the {entity} with the highest SUM(profit)"
+        step1_intent = self.intent_parser.parse(q1, active_table, profile) if profile else None
+        step2_intent = self.intent_parser.parse(q2, active_table, profile) if profile else None
         step1 = PlanStep(
             step_id=1,
-            question=f"Find the {entity} with the highest SUM(sales)",
+            question=q1,
             target_table=active_table,
+            structured_intent=step1_intent,
             depends_on=[],
         )
         step2 = PlanStep(
             step_id=2,
-            question=f"Find the {entity} with the highest SUM(profit)",
+            question=q2,
             target_table=active_table,
+            structured_intent=step2_intent,
             depends_on=[],
         )
         return AnalyticalPlan(
@@ -393,11 +440,20 @@ class QueryPlanner:
 
         steps: list[PlanStep] = []
         for s in raw_steps:
+            step_target = str(s.get("target_table", active_table))
+            step_prof = self._resolve_table_profile(step_target, profile)
+            step_q = str(s.get("question", question))
+            step_intent = (
+                self.intent_parser.parse(step_q, step_target, step_prof)
+                if step_prof
+                else None
+            )
             steps.append(
                 PlanStep(
                     step_id=int(s["step_id"]),
-                    question=str(s.get("question", question)),
-                    target_table=str(s.get("target_table", active_table)),
+                    question=step_q,
+                    target_table=step_target,
+                    structured_intent=step_intent,
                     depends_on=[int(d) for d in s.get("depends_on", [])],
                 )
             )

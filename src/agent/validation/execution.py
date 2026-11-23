@@ -97,7 +97,7 @@ class ExecutionValidator:
             err_msg = raw_execution_result.error_message or "Execution failed"
             err_type = raw_execution_result.error_type or "ExecutionError"
             category = self._categorize_error(raw_execution_result)
-            is_correctable = (category != ErrorCategory.FATAL_SYSTEM)
+            is_correctable = category != ErrorCategory.FATAL_SYSTEM
 
             exec_res = ExecutionValidationResult(
                 layer_name="Layer 1: Execution",
@@ -130,7 +130,11 @@ class ExecutionValidator:
         row_count = raw_execution_result.row_count
         column_count = raw_execution_result.column_count
         df = raw_execution_result.dataframe
-        actual_columns = list(df.columns) if df is not None else []
+        actual_columns = (
+            list(raw_execution_result.columns)
+            if raw_execution_result.columns
+            else (list(df.columns) if df is not None else [])
+        )
         exec_time = raw_execution_result.execution_time_ms
 
         # 3a. Require actual DataFrame for successful ExecutionResult
@@ -383,12 +387,19 @@ class ExecutionValidator:
         Returns:
             Tuple of (route_target, blocking_reason).
         """
-        # Rule 1: Execution failure
+        # Rule 1: Execution or numerical validation failure
         if (
-            not step_validation.execution_result.passed
-            and step_validation.execution_result.status == ValidationStatus.FAILED
+            step_validation.status == ValidationStatus.FAILED
+            or not step_validation.execution_result.passed
+            or step_validation.execution_result.status == ValidationStatus.FAILED
+            or step_validation.numerical_result.status == ValidationStatus.FAILED
         ):
-            return "error_analyzer", step_validation.execution_result.message
+            err_msg = (
+                step_validation.numerical_result.message
+                if step_validation.numerical_result.status == ValidationStatus.FAILED
+                else (step_validation.execution_result.message or "Step validation failed")
+            )
+            return "error_analyzer", err_msg
 
         is_final_step = (plan is None) or (current_step_index + 1 >= len(plan.execution_order))
 
@@ -815,7 +826,7 @@ class ExecutionValidator:
             )
 
         # Distinguish 1x1 projection from scalar: if grouped query returns 1x1, it is tabular
-        is_empty_df = (row_count == 0)
+        is_empty_df = row_count == 0
 
         # Finding 3: Structurally valid empty DataFrames pass Layer 1, but do NOT automatically
         # claim meaningful output without explicit evidence.

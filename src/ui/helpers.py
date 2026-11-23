@@ -36,6 +36,8 @@ __all__ = [
     "profile_to_display_df",
     "get_lifecycle_status_badge",
     "format_step_validation_summary",
+    "format_numerical_evidence_table",
+    "format_numerical_validation_display",
     "validation_report_to_display_rows",
     "serialize_validation_report_for_json",
 ]
@@ -151,25 +153,25 @@ def profile_to_display_df(profile: TableProfile) -> pd.DataFrame:
 
     for col in profile.columns.values():
         samples_str = (
-            ", ".join(repr(s) for s in col.sample_values[:3])
-            if col.sample_values
-            else "-"
+            ", ".join(repr(s) for s in col.sample_values[:3]) if col.sample_values else "-"
         )
         mean_str = f"{col.mean_val:.2f}" if col.mean_val is not None else "-"
         date_fmt = col.date_format if col.is_temporal and col.date_format else "-"
 
-        records.append({
-            "Column": col.name,
-            "Type": col.duckdb_type,
-            "Date Format": date_fmt,
-            "Null Count": col.null_count,
-            "Null %": f"{col.null_percentage:.1f}%",
-            "Distinct": col.distinct_count,
-            "Min": str(col.min_val) if col.min_val is not None else "-",
-            "Max": str(col.max_val) if col.max_val is not None else "-",
-            "Mean": mean_str,
-            "Samples": samples_str,
-        })
+        records.append(
+            {
+                "Column": col.name,
+                "Type": col.duckdb_type,
+                "Date Format": date_fmt,
+                "Null Count": col.null_count,
+                "Null %": f"{col.null_percentage:.1f}%",
+                "Distinct": col.distinct_count,
+                "Min": str(col.min_val) if col.min_val is not None else "-",
+                "Max": str(col.max_val) if col.max_val is not None else "-",
+                "Mean": mean_str,
+                "Samples": samples_str,
+            }
+        )
 
     return pd.DataFrame(records)
 
@@ -247,6 +249,9 @@ def format_step_validation_summary(
             "remediation": step_val.diagnostic.remediation_instruction,
         }
 
+    num_res = step_val.numerical_result
+    num_details = dict(num_res.details) if num_res.details else {}
+
     return {
         "step_status": step_val.status.value,
         "confidence": step_val.confidence.value,
@@ -259,10 +264,137 @@ def format_step_validation_summary(
         "schema_matched": schema_matched,
         "is_empty": step_val.execution_result.is_empty,
         "message": step_val.execution_result.message or "Executed successfully",
-        "numerical_status": step_val.numerical_result.status.value,
+        "numerical_status": num_res.status.value,
+        "numerical_passed": num_res.passed,
+        "numerical_message": num_res.message,
+        "numerical_inconclusive_reason": num_res.inconclusive_reason,
+        "numerical_duckdb_value": num_res.duckdb_value,
+        "numerical_independent_value": num_res.independent_value,
+        "numerical_absolute_difference": num_res.absolute_difference,
+        "numerical_relative_difference": num_res.relative_difference,
+        "numerical_atol": num_res.atol,
+        "numerical_rtol": num_res.rtol,
+        "numerical_compared_rows": num_res.compared_rows,
+        "numerical_details": num_details,
         "semantic_status": step_val.semantic_result.status.value,
         "diagnostic": diagnostic_summary,
         "attempts": len(val_report.step_history.get(step_id, [])),
+    }
+
+
+def format_numerical_evidence_table(
+    details: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Transform raw numerical validation comparisons into clean display rows."""
+    if not details or not isinstance(details, dict):
+        return []
+
+    comparisons = details.get("comparisons") or []
+    if not isinstance(comparisons, (list, tuple)):
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for comp in comparisons:
+        if not isinstance(comp, (dict, pd.Series)) and not hasattr(comp, "get"):
+            continue
+
+        raw_key = comp.get("group_key")
+        if isinstance(raw_key, (list, tuple)):
+            key_str = ", ".join(str(k) for k in raw_key)
+        else:
+            key_str = str(raw_key)
+
+        act_val = comp.get("duckdb_value")
+        exp_val = comp.get("independent_value")
+        abs_diff = comp.get("absolute_difference")
+        rel_diff = comp.get("relative_difference")
+        passed = comp.get("passed", False)
+
+        rel_diff_str = (
+            "N/A (zero denominator)"
+            if rel_diff is None and exp_val == 0.0
+            else ("None" if rel_diff is None else str(rel_diff))
+        )
+
+        rows.append(
+            {
+                "Group Key": key_str,
+                "Metric": str(comp.get("metric", "")),
+                "DuckDB Value": str(act_val),
+                "Independent Value": str(exp_val),
+                "Absolute Difference": str(abs_diff) if abs_diff is not None else "None",
+                "Relative Difference": rel_diff_str,
+                "Status": "✅ Passed" if passed else "❌ Failed",
+            }
+        )
+    return rows
+
+
+def format_numerical_validation_display(
+    num_info: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Parse numerical validation outcome and details for dashboard presentation."""
+    if not num_info or not isinstance(num_info, dict):
+        return {"mode": "none", "status": "UNVERIFIED"}
+
+    status = num_info.get("numerical_status", "UNVERIFIED")
+    details = num_info.get("numerical_details") or {}
+    if not isinstance(details, dict):
+        details = dict(details) if hasattr(details, "items") else {}
+
+    message = num_info.get("numerical_message") or ""
+    inconclusive_reason = num_info.get("numerical_inconclusive_reason")
+
+    is_grouped = bool(details.get("comparisons") or details.get("group_comparisons"))
+    is_scalar = not is_grouped and (
+        num_info.get("is_scalar", False)
+        or num_info.get("numerical_duckdb_value") is not None
+        or num_info.get("numerical_independent_value") is not None
+    )
+
+    if is_grouped:
+        return {
+            "mode": "grouped",
+            "status": status,
+            "passed": num_info.get("numerical_passed", False),
+            "message": message,
+            "inconclusive_reason": inconclusive_reason,
+            "failure_type": details.get("failure_type"),
+            "failure_reason": details.get("failure_reason"),
+            "failing_group_key": details.get("failing_group_key"),
+            "failing_metric": details.get("failing_metric"),
+            "expected_groups": details.get("expected_groups", 0),
+            "actual_groups": details.get("actual_groups", 0),
+            "matched_groups": details.get("matched_groups", 0),
+            "compared_metrics": details.get("compared_metrics", 0),
+            "passed_comparisons": details.get("passed_comparisons", 0),
+            "missing_group_keys": details.get("missing_group_keys", ()),
+            "unexpected_group_keys": details.get("unexpected_group_keys", ()),
+            "comparison_rows": format_numerical_evidence_table(details),
+        }
+
+    if is_scalar:
+        return {
+            "mode": "scalar",
+            "status": status,
+            "passed": num_info.get("numerical_passed", False),
+            "message": message,
+            "inconclusive_reason": inconclusive_reason,
+            "duckdb_value": num_info.get("numerical_duckdb_value"),
+            "independent_value": num_info.get("numerical_independent_value"),
+            "absolute_difference": num_info.get("numerical_absolute_difference"),
+            "relative_difference": num_info.get("numerical_relative_difference"),
+            "atol": num_info.get("numerical_atol", 1e-4),
+            "rtol": num_info.get("numerical_rtol", 1e-4),
+            "compared_rows": num_info.get("numerical_compared_rows", 1),
+        }
+
+    return {
+        "mode": "none",
+        "status": status,
+        "passed": num_info.get("numerical_passed", False),
+        "message": message,
+        "inconclusive_reason": inconclusive_reason,
     }
 
 
@@ -285,22 +417,24 @@ def validation_report_to_display_rows(
         else:
             schema_label = "⚪ Unverified"
 
-        rows.append({
-            "Step ID": f"Step {step_id}",
-            "Step Status": res.status.value,
-            "Confidence": res.confidence.value,
-            "Layer 1 (Execution)": res.execution_result.status.value,
-            "Layer 2 (Numerical)": res.numerical_result.status.value,
-            "Layer 3 (Semantic)": res.semantic_result.status.value,
-            "Schema Match": schema_label,
-            "Shape": (
-                "1×1 Scalar"
-                if res.execution_result.is_scalar
-                else f"{res.execution_result.row_count}×{res.execution_result.column_count}"
-            ),
-            "Attempts": len(report.step_history.get(step_id, [])),
-            "Details": res.execution_result.message or "Execution verified",
-        })
+        rows.append(
+            {
+                "Step ID": f"Step {step_id}",
+                "Step Status": res.status.value,
+                "Confidence": res.confidence.value,
+                "Layer 1 (Execution)": res.execution_result.status.value,
+                "Layer 2 (Numerical)": res.numerical_result.status.value,
+                "Layer 3 (Semantic)": res.semantic_result.status.value,
+                "Schema Match": schema_label,
+                "Shape": (
+                    "1×1 Scalar"
+                    if res.execution_result.is_scalar
+                    else f"{res.execution_result.row_count}×{res.execution_result.column_count}"
+                ),
+                "Attempts": len(report.step_history.get(step_id, [])),
+                "Details": res.execution_result.message or "Execution verified",
+            }
+        )
     return rows
 
 
@@ -330,9 +464,7 @@ def serialize_validation_report_for_json(
     if isinstance(obj, pd.DataFrame):
         preview_records: list[dict[str, Any]] = []
         for row in obj.head(max_preview_rows).to_dict(orient="records"):
-            preview_records.append(
-                serialize_validation_report_for_json(row, max_preview_rows)
-            )
+            preview_records.append(serialize_validation_report_for_json(row, max_preview_rows))
         return {
             "_type": "DataFrame",
             "row_count": len(obj),
@@ -366,10 +498,7 @@ def serialize_validation_report_for_json(
         return bool(obj)
 
     if isinstance(obj, np.ndarray):
-        return [
-            serialize_validation_report_for_json(x, max_preview_rows)
-            for x in obj.tolist()
-        ]
+        return [serialize_validation_report_for_json(x, max_preview_rows) for x in obj.tolist()]
 
     if isinstance(obj, (datetime.datetime, datetime.date, pd.Timestamp)):
         return obj.isoformat()
@@ -387,10 +516,7 @@ def serialize_validation_report_for_json(
         }
 
     if isinstance(obj, (list, tuple, set)):
-        return [
-            serialize_validation_report_for_json(item, max_preview_rows)
-            for item in obj
-        ]
+        return [serialize_validation_report_for_json(item, max_preview_rows) for item in obj]
 
     if isinstance(obj, float):
         if math.isnan(obj):
