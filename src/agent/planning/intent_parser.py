@@ -29,6 +29,10 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from src.agent.data.profiling import TableProfile, format_profile_for_prompt
+from src.agent.planning.grounding import (
+    detect_ungrounded_entities,
+    has_column_grounding_evidence,
+)
 from src.agent.planning.intent import (
     AggregationType,
     FilterSpec,
@@ -82,7 +86,12 @@ CRITICAL RULES:
      ranking_spec={{"mode": "TOP_N_EXACT", "metric": "output_alias", "direction": "ASC",
      "limit": N, "secondary_keys": [{{"column": "group_col", "direction": "ASC"}}]}}.
    - Always include all grouping dimensions in ASC order as secondary tie-breakers.
-5. OUTPUT FORMAT:
+5. UNGROUNDED / UNSUPPORTED ENTITIES:
+   - If the user asks about an entity, concept, or attribute that is NOT supported by the schema
+     (e.g. asking for 'students' or 'student age' or 'people' when dataset has customers/orders),
+     do NOT map or substitute it to unrelated columns (like `customer_id` or `sales`).
+   - Do NOT guess or substitute entities.
+6. OUTPUT FORMAT:
    - Output ONLY a JSON object matching this schema:
 {{
   "table_name": "{table_name}",
@@ -184,6 +193,151 @@ class IntentParser:
                 return res
         return None
 
+    def _resolve_counted_entity(
+        self,
+        q_lower: str,
+        cols: dict[str, Any],
+    ) -> tuple[AggregationType, str | None, list[str], bool]:
+        """Extract and resolve the counted entity or attribute from question.
+
+        Returns:
+            tuple of (aggregation_type, target_col, unsupported_entities, is_count_query)
+        """
+        count_dist_pat = (
+            r"\b(count\s+of\s+distinct|number\s+of\s+distinct|"
+            r"count\s+of\s+unique|number\s+of\s+unique)\b"
+        )
+        is_count = bool(
+            re.search(count_dist_pat, q_lower)
+            or re.search(r"\b(total\s+count|count\s+of|number\s+of|how\s+many|count)\b", q_lower)
+        )
+        if not is_count:
+            return AggregationType.COUNT, None, [], False
+
+        # Explicit row / record count keywords
+        row_record_pattern = (
+            r"\b(?:how\s+many|number\s+of|count\s+of|total\s+count\s+of|count)\s+"
+            r"(?:total\s+)?(rows?|records?|entries|lines?|tuples?|observations?|data\s+points?)\b|"
+            r"\b(?:row|record)\s+count\b|"
+            r"\b(?:rows?|records?|entries)\s+(?:in\s+this|in\s+the|are\s+there)\b"
+        )
+        if re.search(row_record_pattern, q_lower):
+            return AggregationType.COUNT, None, [], True
+
+        # Pure "total count" or "count" with no trailing entity
+        if re.search(r"^(?:what\s+is\s+the\s+)?(?:total\s+)?count\s*[?.]?$", q_lower.strip()):
+            return AggregationType.COUNT, None, [], True
+
+        # Extract entity noun phrase
+        m_ent = re.search(
+            r"\b(?:how\s+many|number\s+of|count\s+of|total\s+count\s+of|count)\s+"
+            r"([a-zA-Z0-9_\-\s]+?)"
+            r"(?:\s+(?:placed|ordered|bought|purchased|are\s+there|is\s+there|were\s+there|was\s+there|are\s+in|is\s+in|were\s+in|"
+            r"were\s+placed|were\s+made|did\s+we|do\s+we|have\s+been|exist|exist\s+in|"
+            r"in\s+this|in\s+the|from\s+the|per\s+|by\s+)\b|[?,.]|$)",
+            q_lower,
+        )
+        if not m_ent:
+            m_single = re.search(
+                r"\b(?:how\s+many|number\s+of|count\s+of|total\s+count\s+of)\s+([a-zA-Z0-9_\-]+)\b",
+                q_lower,
+            )
+            raw_cand = m_single.group(1).strip() if m_single else ""
+        else:
+            raw_cand = m_ent.group(1).strip()
+
+        raw_cand = re.sub(r"\b(total|all)\b", "", raw_cand).strip()
+        is_distinct = bool(re.search(count_dist_pat, q_lower))
+        if re.search(r"\b(unique|distinct)\b", raw_cand) or re.search(
+            r"\b(unique|distinct)\b", q_lower
+        ):
+            is_distinct = True
+            raw_cand = re.sub(r"\b(unique|distinct)\b", "", raw_cand).strip()
+
+        if not raw_cand or raw_cand in (
+            "row",
+            "rows",
+            "record",
+            "records",
+            "entry",
+            "entries",
+            "line",
+            "lines",
+            "tuple",
+            "tuples",
+        ):
+            return AggregationType.COUNT, None, [], True
+
+        valid_order_denominators = ("order_id", "order_number", "order_key", "orders_id")
+
+        # Shortcuts for common business entities
+        if raw_cand in (
+            "customer",
+            "customers",
+            "client",
+            "clients",
+            "customer names",
+            "customer name",
+            "client names",
+        ):
+            cust_cols = [
+                c for c in cols if c.lower() in ("customer_id", "client_id", "customer_name")
+            ]
+            resolved_col = cust_cols[0] if cust_cols else None
+            return (
+                AggregationType.DISTINCT_COUNT,
+                resolved_col,
+                ([] if resolved_col else [raw_cand]),
+                True,
+            )
+
+        if raw_cand in ("order", "orders", "transaction", "transactions"):
+            order_cols = [c for c in cols if c.lower() in valid_order_denominators]
+            resolved_col = order_cols[0] if order_cols else None
+            return (
+                AggregationType.DISTINCT_COUNT,
+                resolved_col,
+                ([] if resolved_col else [raw_cand]),
+                True,
+            )
+
+        if raw_cand in ("product", "products", "item", "items"):
+            prod_cols = [
+                c
+                for c in cols
+                if c.lower() in ("product_id", "product_name", "sub_category", "category")
+            ]
+            resolved_col = prod_cols[0] if prod_cols else None
+            return (
+                AggregationType.DISTINCT_COUNT,
+                resolved_col,
+                ([] if resolved_col else [raw_cand]),
+                True,
+            )
+
+        # Check column name directly or dimension candidate
+        resolved_col = self._resolve_col(raw_cand, cols) or self._resolve_dim_candidate(
+            raw_cand, cols
+        )
+        if not resolved_col:
+            # Check if any column name is embedded as word in candidate
+            for c in cols:
+                if re.search(rf"\b{re.escape(c.lower())}\b", raw_cand):
+                    resolved_col = c
+                    break
+
+        if resolved_col:
+            is_num = self._is_numeric(cols[resolved_col])
+            agg = (
+                AggregationType.COUNT
+                if (is_num and not is_distinct)
+                else AggregationType.DISTINCT_COUNT
+            )
+            return agg, resolved_col, [], True
+
+        # Entity could NOT be grounded in schema
+        return AggregationType.COUNT, None, [raw_cand], True
+
     def parse(
         self,
         question: str,
@@ -207,6 +361,8 @@ class IntentParser:
         # Step 1: Attempt deterministic heuristic extraction
         heuristic_spec = self._parse_heuristics(clean_q, target_table, profile)
         if heuristic_spec is not None:
+            if not heuristic_spec.is_grounded or heuristic_spec.unsupported_entities:
+                return heuristic_spec
             validated = self._validate_intent(heuristic_spec, profile)
             if validated is not None:
                 return validated
@@ -215,7 +371,34 @@ class IntentParser:
         if self.client:
             llm_spec = self._parse_with_llm(clean_q, target_table, profile)
             if llm_spec is not None:
+                if not llm_spec.is_grounded or llm_spec.unsupported_entities:
+                    return llm_spec
                 return self._validate_intent(llm_spec, profile)
+
+        # Step 3: Check if question asked for an entity count unsupported by schema
+        count_trigger = re.search(
+            r"\b(how\s+many|number\s+of|count\s+of|total\s+count\s+of)\b", clean_q.lower()
+        )
+        if count_trigger:
+            _, _, unsupp, _ = self._resolve_counted_entity(clean_q.lower(), profile.columns)
+            if unsupp:
+                clean_name = re.sub(r"[^a-zA-Z0-9_]", "_", unsupp[0])
+                return QuerySpecification(
+                    raw_question=clean_q,
+                    table_name=target_table,
+                    metrics=[
+                        MetricSpec(
+                            name=f"count_{clean_name}",
+                            aggregation=AggregationType.COUNT,
+                            column=None,
+                        )
+                    ],
+                    dimensions=[],
+                    time_constraints=[],
+                    is_grounded=False,
+                    intent_reliability=IntentReliability.UNGROUNDED,
+                    unsupported_entities=unsupp,
+                )
 
         # Fail-closed: intent cannot be established
         return None
@@ -435,27 +618,18 @@ class IntentParser:
 
         # Condition 1: Explicit aggregation keyword required
         agg_type: AggregationType | None = None
+        target_col: str | None = None
+        denominator_col: str | None = None
+        unsupported_entities: list[str] = []
+        valid_order_denominators = ("order_id", "order_number", "order_key", "orders_id")
 
-        count_dist_pat = (
-            r"\b(count\s+of\s+distinct|number\s+of\s+distinct|"
-            r"count\s+of\s+unique|number\s+of\s+unique)\b"
-        )
+        count_agg, count_col, unsupp_list, is_count = self._resolve_counted_entity(q_lower, cols)
         if any(k in q_lower for k in ["average order value", "aov"]):
             agg_type = AggregationType.AOV
-        elif re.search(count_dist_pat, q_lower):
-            agg_type = AggregationType.DISTINCT_COUNT
-        elif re.search(r"\b(total\s+count|count\s+of|number\s+of|how\s+many|count)\b", q_lower):
-            entity_match = re.search(
-                r"\b(?:how\s+many|number\s+of|count\s+of|total\s+count\s+of)\s+([a-zA-Z_]+)\b",
-                q_lower,
-            )
-            counted_entity = entity_match.group(1).lower() if entity_match else ""
-            if counted_entity in ("customer", "customers", "client", "clients"):
-                agg_type = AggregationType.DISTINCT_COUNT
-            elif counted_entity in ("order", "orders", "transaction", "transactions"):
-                agg_type = AggregationType.DISTINCT_COUNT
-            else:
-                agg_type = AggregationType.COUNT
+        elif is_count:
+            agg_type = count_agg
+            target_col = count_col
+            unsupported_entities = unsupp_list
         elif re.search(r"\b(average|avg|mean)\b", q_lower):
             agg_type = AggregationType.AVG
         elif re.search(r"\b(total|sum\s+of|aggregate\s+of|combined)\b", q_lower):
@@ -470,11 +644,27 @@ class IntentParser:
             # MUST NOT be heuristically inferred as SUM!
             return None
 
-        # Condition 2: Target metric column binding
-        target_col: str | None = None
-        denominator_col: str | None = None
-        valid_order_denominators = ("order_id", "order_number", "order_key", "orders_id")
+        # Condition 1b: If requested count entity is unsupported by schema, return ungrounded intent
+        if unsupported_entities:
+            clean_name = re.sub(r"[^a-zA-Z0-9_]", "_", unsupported_entities[0])
+            return QuerySpecification(
+                raw_question=question,
+                table_name=target_table,
+                metrics=[
+                    MetricSpec(
+                        name=f"count_{clean_name}",
+                        aggregation=AggregationType.COUNT,
+                        column=None,
+                    )
+                ],
+                dimensions=[],
+                time_constraints=[],
+                is_grounded=False,
+                intent_reliability=IntentReliability.UNGROUNDED,
+                unsupported_entities=unsupported_entities,
+            )
 
+        # Condition 2: Target metric column binding
         if agg_type == AggregationType.AOV:
             # Sales column for numerator, order_id for denominator
             sales_cols = [
@@ -487,34 +677,11 @@ class IntentParser:
             else:
                 return None
         elif agg_type == AggregationType.DISTINCT_COUNT:
-            entity_match = re.search(
-                r"\b(?:how\s+many|number\s+of|count\s+of|total\s+count\s+of)\s+([a-zA-Z_]+)\b",
-                q_lower,
-            )
-            counted_entity = entity_match.group(1).lower() if entity_match else ""
-            if (
-                counted_entity in ("customer", "customers", "client", "clients")
-                or "customer" in q_lower
-            ):
-                cust_cols = [c for c in cols if c.lower() in ("customer_id", "client_id")]
-                target_col = cust_cols[0] if cust_cols else None
-            elif (
-                counted_entity in ("order", "orders", "transaction", "transactions")
-                or "order" in q_lower
-            ):
-                order_cols = [c for c in cols if c.lower() in valid_order_denominators]
-                target_col = order_cols[0] if order_cols else None
-            else:
-                # Find matching column name
-                for c in cols:
-                    if re.search(rf"\b{re.escape(c.lower())}\b", q_lower):
-                        target_col = c
-                        break
             if not target_col:
                 return None
         elif agg_type == AggregationType.COUNT:
-            # Row count COUNT(*)
-            target_col = None
+            # Table row count COUNT(*) - target_col is already None
+            pass
         else:
             # SUM, AVG, MIN, MAX: Find referenced numeric column
             matched_num_cols = []
@@ -601,6 +768,11 @@ class IntentParser:
             metrics=[metric_spec],
             dimensions=dimensions,
             time_constraints=time_constraints,
+            is_grounded=len(unsupported_entities) == 0,
+            intent_reliability=IntentReliability.HIGH
+            if not unsupported_entities
+            else IntentReliability.UNGROUNDED,
+            unsupported_entities=unsupported_entities,
         )
 
     def _parse_with_llm(
@@ -673,6 +845,27 @@ class IntentParser:
                     return None
             elif col == "*":
                 resolved_col = None
+
+            # Reject entity substitution (e.g. LLM substituted customer_id for students)
+            ungrounded_in_q = detect_ungrounded_entities(spec.raw_question, profile)
+            if ungrounded_in_q and resolved_col:
+                if not has_column_grounding_evidence(resolved_col, spec.raw_question, profile):
+                    clean_name = re.sub(r"[^a-zA-Z0-9_]", "_", ungrounded_in_q[0])
+                    return QuerySpecification(
+                        raw_question=spec.raw_question,
+                        table_name=profile.table_name,
+                        metrics=[
+                            MetricSpec(
+                                name=f"count_{clean_name}",
+                                aggregation=AggregationType.COUNT,
+                                column=None,
+                            )
+                        ],
+                        dimensions=[],
+                        is_grounded=False,
+                        intent_reliability=IntentReliability.UNGROUNDED,
+                        unsupported_entities=ungrounded_in_q,
+                    )
 
             # Aggregation type-specific constraints
             denom_col = m.denominator_column
@@ -839,6 +1032,16 @@ class IntentParser:
                     validated_order_by.append(f"{d} ASC")
                     ob_cols.add(d.lower())
 
+        is_grounded = getattr(spec, "is_grounded", True)
+        unsupp = list(getattr(spec, "unsupported_entities", []))
+        if unsupp:
+            is_grounded = False
+        rel = (
+            IntentReliability.UNGROUNDED
+            if not is_grounded
+            else getattr(spec, "intent_reliability", IntentReliability.HIGH)
+        )
+
         return QuerySpecification(
             raw_question=spec.raw_question,
             table_name=profile.table_name,
@@ -850,8 +1053,9 @@ class IntentParser:
             order_by=validated_order_by,
             limit=validated_limit,
             ranking_spec=validated_ranking,
-            is_grounded=True,
-            intent_reliability=getattr(spec, "intent_reliability", IntentReliability.HIGH),
+            is_grounded=is_grounded,
+            intent_reliability=rel,
+            unsupported_entities=unsupp,
         )
 
     def _resolve_col(self, col_name: str, valid_cols: dict[str, Any]) -> str | None:

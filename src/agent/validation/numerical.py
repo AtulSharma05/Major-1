@@ -37,6 +37,7 @@ from src.agent.execution.engine import ExecutionResult
 from src.agent.planning.intent import (
     AggregationType,
     FilterSpec,
+    IntentReliability,
     QuerySpecification,
     SortDirection,
     TimeConstraint,
@@ -1012,6 +1013,28 @@ class NumericalValidator:
                 status=ValidationStatus.INCONCLUSIVE,
                 message="Structured QuerySpecification unavailable; recalculation skipped.",
                 inconclusive_reason="missing_structured_intent",
+            )
+
+        if (
+            not getattr(spec, "is_grounded", True)
+            or getattr(spec, "intent_reliability", None) == "UNGROUNDED"
+            or getattr(spec, "intent_reliability", None) == IntentReliability.UNGROUNDED
+            or bool(getattr(spec, "unsupported_entities", None))
+        ):
+            unsupp_str = (
+                ", ".join(spec.unsupported_entities)
+                if getattr(spec, "unsupported_entities", None)
+                else "unsupported entity"
+            )
+            return NumericalValidationResult(
+                layer_name="Layer 2: Numerical",
+                passed=False,
+                status=ValidationStatus.INCONCLUSIVE,
+                message=(
+                    f"Query references unsupported schema entity '{unsupp_str}'; "
+                    "independent numerical calculation cannot be performed."
+                ),
+                inconclusive_reason="unsupported_schema_entity",
             )
 
         calc_res, inconv_reason = self.calculator.calculate(

@@ -15,6 +15,8 @@ CRITICAL RULES:
    - Use ONLY the exact column names present in the table schema.
    - NEVER invent, assume, or hallucinate columns (e.g., if there is no `product_name`,
      use `sub_category` or `category`; if there is no generic `date`, use `order_date`).
+   - NEVER silently substitute or map unsupported entities (e.g. mapping 'students' or 'people'
+     to 'customer_id'). If a requested entity is absent from the schema, do NOT substitute it.
    - Every column in SELECT, WHERE, GROUP BY, or ORDER BY MUST appear in the schema.
 3. IDENTIFIERS: All column names in the schema are lowercase snake_case. Do not wrap them in
    unnecessary brackets or quotes unless required.
@@ -72,6 +74,15 @@ def build_sql_prompt(
     cols = profile.columns.keys()
     q_lower = question.lower()
     guidance_notes = []
+
+    # Check for unsupported entities in structured intent
+    if intent and intent.unsupported_entities:
+        unsupp_str = ", ".join(intent.unsupported_entities)
+        guidance_notes.append(
+            f"- CRITICAL: The requested entity/attribute '{unsupp_str}' does NOT exist in table "
+            f"`{profile.table_name}`. Do NOT replace or hallucinate it with a generic COUNT(*) "
+            f"or unrelated columns. Do not guess."
+        )
 
     # Dynamic entity resolution when question asks for 'product' but column is missing
     if ("product" in q_lower or "item" in q_lower) and "product_name" not in cols:

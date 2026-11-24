@@ -79,6 +79,28 @@ class ResultAssembler:
                     assembly_notes=["Step result missing from execution."],
                 )
 
+            step_obj = plan.steps[0] if plan.steps else None
+            intent = step_obj.structured_intent if step_obj else None
+            if intent and (not intent.is_grounded or intent.unsupported_entities):
+                unsupp_str = (
+                    ", ".join(intent.unsupported_entities)
+                    if intent.unsupported_entities
+                    else "unsupported entity"
+                )
+                return AssembledResult(
+                    original_question=plan.original_question,
+                    is_multi_step=False,
+                    all_steps_succeeded=False,
+                    step_results=step_results,
+                    primary_dataframe=None,
+                    primary_scalar=None,
+                    summary_metrics={},
+                    assembly_notes=[
+                        f"Calculation inconclusive: requested entity '{unsupp_str}' "
+                        "is absent from dataset schema."
+                    ],
+                )
+
             return AssembledResult(
                 original_question=plan.original_question,
                 is_multi_step=False,

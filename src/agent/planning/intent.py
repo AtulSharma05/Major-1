@@ -244,6 +244,10 @@ class QuerySpecification(BaseModel):
         default=IntentReliability.HIGH,
         description="Reliability rating of the extracted intent",
     )
+    unsupported_entities: list[str] = Field(
+        default_factory=list,
+        description="Entities or attributes requested in question that are absent from schema",
+    )
 
     def is_grouped(self) -> bool:
         """Return True if this query specifies grouping dimensions."""

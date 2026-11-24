@@ -321,6 +321,44 @@ class ExecutionValidator:
                 has_meaningful_output=has_meaningful,
             )
 
+        # 4b. Check for unsupported schema entities in structured intent
+        if getattr(structured_intent, "unsupported_entities", None):
+            unsupp_str = ", ".join(structured_intent.unsupported_entities)
+            exec_res = ExecutionValidationResult(
+                layer_name="Layer 1: Execution",
+                passed=False,
+                status=ValidationStatus.INCONCLUSIVE,
+                message=f"Query references unsupported schema entity: '{unsupp_str}'.",
+                is_empty=raw_execution_result.is_empty(),
+                is_scalar=raw_execution_result.is_scalar,
+                row_count=row_count,
+                column_count=column_count,
+                schema_matched=False,
+                execution_time_ms=exec_time,
+                details={"unsupported_entities": tuple(structured_intent.unsupported_entities)},
+            )
+            diag = CorrectionDiagnostic(
+                error_category=ErrorCategory.SCHEMA_ERROR,
+                is_correctable=False,
+                failed_layer="Layer 1: Execution",
+                error_summary=f"Query references unsupported schema entity: '{unsupp_str}'.",
+                remediation_instruction=(
+                    f"Entity '{unsupp_str}' does not exist in dataset schema. "
+                    "Cannot verify or execute query for unsupported entity."
+                ),
+                prior_attempt_sql=executed_sql or "",
+                attempt_number=attempt_number,
+            )
+            return self._build_step_result(
+                step_id=effective_step_id,
+                attempt_number=attempt_number,
+                execution_res=exec_res,
+                raw_execution_result=raw_execution_result,
+                diagnostic=diag,
+                executed_sql=executed_sql,
+                has_meaningful_output=False,
+            )
+
         # 5. Intent-guided analytical grain classification
         grain = self._classify_grain(structured_intent)
 
@@ -390,7 +428,6 @@ class ExecutionValidator:
         # Rule 1: Execution, numerical, or semantic validation failure
         if (
             step_validation.status == ValidationStatus.FAILED
-            or not step_validation.execution_result.passed
             or step_validation.execution_result.status == ValidationStatus.FAILED
             or step_validation.numerical_result.status == ValidationStatus.FAILED
             or step_validation.semantic_result.status == ValidationStatus.FAILED

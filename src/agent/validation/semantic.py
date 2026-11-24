@@ -36,6 +36,9 @@ from sqlglot import exp
 
 from src.agent.data.profiling import TableProfile
 from src.agent.execution.engine import ExecutionResult
+from src.agent.planning.grounding import (
+    detect_ungrounded_entities,
+)
 from src.agent.planning.intent import (
     AggregationType,
     ConversionPolicy,
@@ -422,6 +425,25 @@ class SemanticValidator:
         intent_ev = {"schema_columns": sorted(list(profile_cols))}
         ast_ev = {"referenced_columns": sorted(list(referenced_cols))}
 
+        if getattr(intent, "unsupported_entities", None):
+            unsupp_str = ", ".join(intent.unsupported_entities)
+            t_name = profile.table_name if profile else "unknown"
+            return SemanticCheckDetail(
+                check_name="check_column_grounding",
+                status=ValidationStatus.INCONCLUSIVE,
+                passed=False,
+                diagnostic_code="unsupported_entity_requested",
+                explanation=(
+                    f"Requested entity/attribute '{unsupp_str}' is absent from schema "
+                    f"in table `{t_name}` and cannot be grounded."
+                ),
+                intent_evidence={
+                    "is_grounded": False,
+                    "unsupported_entities": intent.unsupported_entities,
+                },
+                ast_evidence={"referenced_columns": sorted(list(referenced_cols))},
+            )
+
         if unknown_cols:
             return SemanticCheckDetail(
                 check_name="check_column_grounding",
@@ -431,6 +453,35 @@ class SemanticValidator:
                 explanation=f"SQL references columns that do not exist in schema: {unknown_cols}.",
                 intent_evidence=intent_ev,
                 ast_evidence=ast_ev,
+            )
+
+        # Check semantic grounding evidence against natural language question
+        raw_q = intent.raw_question if intent else ""
+        unsupported_concepts: list[str] = []
+        if raw_q and profile:
+            unsupported_concepts = detect_ungrounded_entities(raw_q, profile)
+        if getattr(intent, "unsupported_entities", None):
+            for u in intent.unsupported_entities:
+                if u not in unsupported_concepts:
+                    unsupported_concepts.append(u)
+
+        if unsupported_concepts:
+            unsupp_str = ", ".join(unsupported_concepts)
+            t_name = profile.table_name if profile else "unknown"
+            return SemanticCheckDetail(
+                check_name="check_column_grounding",
+                status=ValidationStatus.INCONCLUSIVE,
+                passed=False,
+                diagnostic_code="unsupported_entity_column_substitution",
+                explanation=(
+                    f"Requested entity/attribute '{unsupp_str}' is absent from schema "
+                    f"in table `{t_name}` and cannot be grounded."
+                ),
+                intent_evidence={
+                    "is_grounded": False,
+                    "unsupported_entities": unsupported_concepts,
+                },
+                ast_evidence={"referenced_columns": sorted(list(referenced_cols))},
             )
 
         return SemanticCheckDetail(
@@ -593,6 +644,28 @@ class SemanticValidator:
         profile: TableProfile | None,
     ) -> SemanticCheckDetail:
         """Check 4: Verify metric aggregation formulas, output types, and conversion policies."""
+        if getattr(intent, "unsupported_entities", None) or not getattr(
+            intent, "is_grounded", True
+        ):
+            unsupp_str = (
+                ", ".join(intent.unsupported_entities)
+                if getattr(intent, "unsupported_entities", None)
+                else "unsupported entity"
+            )
+            return SemanticCheckDetail(
+                check_name="check_metric_correctness",
+                status=ValidationStatus.INCONCLUSIVE,
+                passed=False,
+                diagnostic_code="unsupported_entity_metric",
+                explanation=(
+                    f"Cannot verify metric correctness for ungrounded entity: {unsupp_str}."
+                ),
+                intent_evidence={
+                    "unsupported_entities": getattr(intent, "unsupported_entities", [])
+                },
+                ast_evidence={},
+            )
+
         if not intent.metrics:
             return SemanticCheckDetail(
                 check_name="check_metric_correctness",
@@ -1674,6 +1747,31 @@ class SemanticValidator:
         execution_result: ExecutionResult | None,
     ) -> tuple[SemanticCheckDetail, CanonicalProjectionView | None]:
         """Check 8: Validate projection contract using ProjectionNormalizer."""
+        if getattr(intent, "unsupported_entities", None) or not getattr(
+            intent, "is_grounded", True
+        ):
+            unsupp_str = (
+                ", ".join(intent.unsupported_entities)
+                if getattr(intent, "unsupported_entities", None)
+                else "unsupported entity"
+            )
+            return (
+                SemanticCheckDetail(
+                    check_name="check_projection_contract",
+                    status=ValidationStatus.INCONCLUSIVE,
+                    passed=False,
+                    diagnostic_code="unsupported_entity_projection",
+                    explanation=(
+                        f"Cannot establish projection contract for ungrounded entity: {unsupp_str}."
+                    ),
+                    intent_evidence={
+                        "unsupported_entities": getattr(intent, "unsupported_entities", [])
+                    },
+                    ast_evidence={},
+                ),
+                None,
+            )
+
         expected_dims: list[str] = []
         seen_dims: set[str] = set()
         covered_cols: set[str] = set()

@@ -424,11 +424,7 @@ def determine_step_status(
     if raw_execution_result is not None and not raw_execution_result.success:
         return ValidationStatus.FAILED
 
-    # Layer 1 execution check failure
-    if not execution_res.passed or execution_res.status == ValidationStatus.FAILED:
-        return ValidationStatus.FAILED
-
-    # Layer 2 or Layer 3 failure
+    # Demonstrable failure in any validation layer
     if any(layer.status == ValidationStatus.FAILED for layer in layers):
         return ValidationStatus.FAILED
 

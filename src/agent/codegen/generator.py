@@ -10,7 +10,7 @@ import httpx
 
 from src.agent.codegen.prompts import SYSTEM_PROMPT, build_sql_prompt
 from src.agent.data.profiling import TableProfile
-from src.agent.planning.intent import QuerySpecification
+from src.agent.planning.intent import AggregationType, QuerySpecification
 
 
 def extract_sql_from_response(raw_text: str) -> str:
@@ -171,6 +171,18 @@ class CodeGenerator:
             intent = parser.parse(question, profile.table_name, profile)
 
         table = profile.table_name
+        if intent and (not intent.is_grounded or intent.unsupported_entities):
+            ent = (
+                intent.unsupported_entities[0]
+                if intent.unsupported_entities
+                else "unsupported_entity"
+            )
+            clean_ent = re.sub(r"[^a-zA-Z0-9_]", "_", ent)
+            return (
+                f"-- Analytical query references unsupported entity: {ent}\n"
+                f"SELECT NULL AS {clean_ent} FROM {table} WHERE 1 = 0"
+            )
+
         if not intent:
             target_metric = "sales" if profile.columns and "sales" in profile.columns else None
             if not target_metric and profile.columns:
@@ -193,8 +205,12 @@ class CodeGenerator:
             for m in intent.metrics:
                 col = m.column
                 agg = m.aggregation.value.upper()
-                name = m.name or f"{agg.lower()}_{col}"
-                select_parts.append(f"{agg}({col}) AS {name}")
+                name = m.name or f"{agg.lower()}_{col or 'all'}"
+                col_expr = col if col else "*"
+                if m.aggregation == AggregationType.DISTINCT_COUNT:
+                    select_parts.append(f"COUNT(DISTINCT {col_expr}) AS {name}")
+                else:
+                    select_parts.append(f"{agg}({col_expr}) AS {name}")
         else:
             select_parts.append("COUNT(*) AS total_count")
 

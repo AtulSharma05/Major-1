@@ -24,7 +24,12 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, Field
 
 from src.agent.data.profiling import TableProfile, format_profile_for_prompt
-from src.agent.planning.intent import QuerySpecification
+from src.agent.planning.intent import (
+    AggregationType,
+    IntentReliability,
+    MetricSpec,
+    QuerySpecification,
+)
 from src.agent.planning.intent_parser import IntentParser
 
 if TYPE_CHECKING:
@@ -180,6 +185,7 @@ DATASET & GRANULARITY AWARENESS:
   - If a column like `product_name` exists, use it.
   - If `product_name` is absent but `sub_category` exists, query `sub_category`.
 - NEVER invent column names that do not appear in the schema.
+- NEVER silently substitute unsupported entities (e.g. mapping 'students' to 'customers').
 
 JSON FORMAT SPECIFICATION:
 {{
@@ -264,25 +270,7 @@ class QueryPlanner:
         # Step 1: Pre-classification heuristic
         # If question is clearly simple, avoid LLM latency and generate 1-step plan immediately
         if self._is_definitely_single_step(clean_question):
-            step_prof = self._resolve_table_profile(active_table, profile)
-            intent = (
-                self.intent_parser.parse(clean_question, active_table, step_prof)
-                if step_prof
-                else None
-            )
-            step = PlanStep(
-                step_id=1,
-                question=clean_question,
-                target_table=active_table,
-                structured_intent=intent,
-                depends_on=[],
-            )
-            return AnalyticalPlan(
-                original_question=clean_question,
-                steps=[step],
-                execution_order=[1],
-                is_multi_step=False,
-            )
+            return self._build_single_step_plan(clean_question, active_table, profile)
 
         # Step 2: If LLM client is available and schema profile is provided, attempt LLM planning
         if self.client and profile:
@@ -302,10 +290,40 @@ class QueryPlanner:
             return comparison_plan
 
         # Step 4: Default fallback: treat as single-step plan
+        return self._build_single_step_plan(clean_question, active_table, profile)
+
+    def _build_single_step_plan(
+        self,
+        clean_question: str,
+        active_table: str,
+        profile: TableProfile | None,
+    ) -> AnalyticalPlan:
+        """Construct a single-step analytical plan with grounding fallback."""
         step_prof = self._resolve_table_profile(active_table, profile)
         intent = (
             self.intent_parser.parse(clean_question, active_table, step_prof) if step_prof else None
         )
+        if intent is None and step_prof:
+            from src.agent.planning.grounding import detect_ungrounded_entities
+
+            unsupported = detect_ungrounded_entities(clean_question, step_prof)
+            if unsupported:
+                clean_ent = re.sub(r"[^a-zA-Z0-9_]", "_", unsupported[0])
+                intent = QuerySpecification(
+                    raw_question=clean_question,
+                    table_name=active_table,
+                    metrics=[
+                        MetricSpec(
+                            name=f"unsupported_{clean_ent}",
+                            aggregation=AggregationType.COUNT,
+                            column=None,
+                        )
+                    ],
+                    dimensions=[],
+                    is_grounded=False,
+                    intent_reliability=IntentReliability.UNGROUNDED,
+                    unsupported_entities=unsupported,
+                )
         step = PlanStep(
             step_id=1,
             question=clean_question,

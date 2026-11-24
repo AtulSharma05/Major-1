@@ -633,3 +633,84 @@ def test_llm_path_valid_ranking_passes_gate(superstore_profile: TableProfile):
     assert spec.ranking_spec is not None
     assert spec.ranking_spec.limit == 5
     assert spec.is_grounded is True
+
+
+# --- Regression Tests: Unsupported Entity Requests Must Not Become Row Counts ---
+
+
+def test_parse_how_many_students_are_there(superstore_profile: TableProfile):
+    """'How many students are there?' on Superstore must NOT become a generic row count."""
+    parser = IntentParser()
+    spec = parser.parse("How many students are there?", "superstore", superstore_profile)
+
+    assert spec is not None
+    assert spec.is_grounded is False
+    assert spec.intent_reliability.value == "UNGROUNDED"
+    assert spec.unsupported_entities == ["students"]
+    assert spec.metrics[0].column != "*"
+    assert spec.metrics[0].column is None
+    # Must not be a valid grounded row count
+    assert not spec.is_grounded
+
+
+def test_parse_how_many_student_names_are_there(superstore_profile: TableProfile):
+    """'How many student names are there?' on Superstore must be flagged as ungrounded."""
+    parser = IntentParser()
+    spec = parser.parse("How many student names are there?", "superstore", superstore_profile)
+
+    assert spec is not None
+    assert spec.is_grounded is False
+    assert spec.intent_reliability.value == "UNGROUNDED"
+    assert any("student" in e for e in spec.unsupported_entities)
+
+
+def test_parse_how_many_rows_are_there(superstore_profile: TableProfile):
+    """Legitimate row count: 'How many rows are there?' -> COUNT(*) with is_grounded=True."""
+    parser = IntentParser()
+    spec = parser.parse("How many rows are there?", "superstore", superstore_profile)
+
+    assert spec is not None
+    assert spec.is_grounded is True
+    assert spec.intent_reliability.value == "HIGH"
+    assert len(spec.unsupported_entities) == 0
+    assert spec.metrics[0].aggregation == AggregationType.COUNT
+    assert spec.metrics[0].column is None
+
+
+def test_parse_how_many_records_are_there(superstore_profile: TableProfile):
+    """Legitimate row count: 'How many records are there?' -> COUNT(*) with is_grounded=True."""
+    parser = IntentParser()
+    spec = parser.parse("How many records are there?", "superstore", superstore_profile)
+
+    assert spec is not None
+    assert spec.is_grounded is True
+    assert spec.intent_reliability.value == "HIGH"
+    assert len(spec.unsupported_entities) == 0
+    assert spec.metrics[0].aggregation == AggregationType.COUNT
+    assert spec.metrics[0].column is None
+
+
+def test_parse_how_many_unique_customers_are_there(superstore_profile: TableProfile):
+    """Legitimate entity count: 'How many unique customers?' -> customer_id DISTINCT_COUNT."""
+    parser = IntentParser()
+    spec = parser.parse("How many unique customers are there?", "superstore", superstore_profile)
+
+    assert spec is not None
+    assert spec.is_grounded is True
+    assert spec.intent_reliability.value == "HIGH"
+    assert len(spec.unsupported_entities) == 0
+    assert spec.metrics[0].aggregation == AggregationType.DISTINCT_COUNT
+    assert spec.metrics[0].column == "customer_id"
+
+
+def test_parse_how_many_orders_were_placed(superstore_profile: TableProfile):
+    """Legitimate entity count: 'How many orders were placed?' -> order_id DISTINCT_COUNT."""
+    parser = IntentParser()
+    spec = parser.parse("How many orders were placed?", "superstore", superstore_profile)
+
+    assert spec is not None
+    assert spec.is_grounded is True
+    assert spec.intent_reliability.value == "HIGH"
+    assert len(spec.unsupported_entities) == 0
+    assert spec.metrics[0].aggregation == AggregationType.DISTINCT_COUNT
+    assert spec.metrics[0].column == "order_id"

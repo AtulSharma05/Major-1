@@ -920,6 +920,9 @@ with tab_workspace:
                             st.markdown(f"**Temporal Trend ({y_col} over {x_col}):**")
                             chart_df = df_out[[x_col, y_col]].dropna().set_index(x_col)
                             st.line_chart(chart_df)
+                elif assembled.assembly_notes:
+                    for note in assembled.assembly_notes:
+                        st.warning(note)
 
                 # Assembly Notes
                 if assembled.assembly_notes:
