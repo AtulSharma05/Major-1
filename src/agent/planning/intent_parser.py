@@ -32,8 +32,13 @@ from src.agent.data.profiling import TableProfile, format_profile_for_prompt
 from src.agent.planning.intent import (
     AggregationType,
     FilterSpec,
+    IntentReliability,
     MetricSpec,
+    OrderBySpec,
     QuerySpecification,
+    RankingMode,
+    RankingSpec,
+    SortDirection,
     TimeConstraint,
 )
 
@@ -66,7 +71,18 @@ CRITICAL RULES:
    - For calendar year filters (e.g. 2017), use half-open intervals:
      start_time="YYYY-01-01", end_time="YYYY+1-01-01", is_half_open=true.
    - Target the temporal date column present in the schema (e.g., `order_date`).
-4. OUTPUT FORMAT:
+4. ORDERING AND RANKING:
+   - For Top N questions (e.g. "top 5"), set limit=N.
+   - For ranking: "top", "highest", "best", "most":
+     order_by=["output_alias DESC", "group_col ASC"],
+     ranking_spec={{"mode": "TOP_N_EXACT", "metric": "output_alias", "direction": "DESC",
+     "limit": N, "secondary_keys": [{{"column": "group_col", "direction": "ASC"}}]}}.
+   - For "bottom", "lowest", "worst", "least":
+     order_by=["output_alias ASC", "group_col ASC"],
+     ranking_spec={{"mode": "TOP_N_EXACT", "metric": "output_alias", "direction": "ASC",
+     "limit": N, "secondary_keys": [{{"column": "group_col", "direction": "ASC"}}]}}.
+   - Always include all grouping dimensions in ASC order as secondary tie-breakers.
+5. OUTPUT FORMAT:
    - Output ONLY a JSON object matching this schema:
 {{
   "table_name": "{table_name}",
@@ -95,7 +111,14 @@ CRITICAL RULES:
       "is_half_open": true
     }}
   ],
-  "limit": null
+  "order_by": ["output_alias DESC"],
+  "limit": 5,
+  "ranking_spec": {{
+    "mode": "TOP_N_EXACT",
+    "metric": "output_alias",
+    "direction": "DESC",
+    "limit": 5
+  }}
 }}
 Do not output markdown fences, commentary, or conversational text. Output raw JSON only.
 """
@@ -117,14 +140,49 @@ class IntentParser:
     def _is_numeric(col_prof: Any) -> bool:
         """Check whether a column is numeric according to its DuckDB type or statistics."""
         numeric_types = (
-            "INT", "DOUBLE", "FLOAT", "DECIMAL", "NUMERIC",
-            "HUGEINT", "TINYINT", "SMALLINT", "BIGINT", "REAL",
+            "INT",
+            "DOUBLE",
+            "FLOAT",
+            "DECIMAL",
+            "NUMERIC",
+            "HUGEINT",
+            "TINYINT",
+            "SMALLINT",
+            "BIGINT",
+            "REAL",
         )
         dtype = str(getattr(col_prof, "duckdb_type", "")).upper()
         return (
             any(t in dtype for t in numeric_types)
             or getattr(col_prof, "mean_val", None) is not None
         )
+
+    def _resolve_dim_candidate(self, cand: str, valid_cols: dict[str, Any]) -> str | None:
+        """Resolve plural, hyphenated, or entity dimension words to schema column."""
+        if not cand:
+            return None
+        res = self._resolve_col(cand, valid_cols)
+        if res:
+            return res
+        norm = cand.lower().strip().replace("-", "_").replace(" ", "_")
+        res = self._resolve_col(norm, valid_cols)
+        if res:
+            return res
+        stem = norm
+        if stem.endswith("ies"):
+            stem = stem[:-3] + "y"
+        elif stem.endswith("es") and not stem.endswith("sales"):
+            stem = stem[:-2]
+        elif stem.endswith("s") and not stem.endswith("sales"):
+            stem = stem[:-1]
+        res = self._resolve_col(stem, valid_cols)
+        if res:
+            return res
+        for suffix in ("_id", "_name", "_key", "_desc"):
+            res = self._resolve_col(f"{stem}{suffix}", valid_cols)
+            if res:
+                return res
+        return None
 
     def parse(
         self,
@@ -168,19 +226,203 @@ class IntentParser:
         target_table: str,
         profile: TableProfile,
     ) -> QuerySpecification | None:
-        """Deterministic heuristic fast path adhering strictly to the 5 acceptance conditions."""
+        """Deterministic heuristic fast path adhering strictly to acceptance conditions."""
         q_lower = question.lower().strip()
+        cols = profile.columns
+
+        # Fast-Path A: Structured Top-N Ranking Questions
+        # e.g. "What were the top 5 sub-categories by total sales in 2017?"
+        # e.g. "What were the 5 sub-categories with the lowest total sales in 2017?"
+        m_top = re.search(r"\b(top|bottom|best|worst)\s+(\d+)(?:\s+([a-zA-Z0-9_\-]+))?\b", q_lower)
+        m_n_dim = re.search(
+            r"\b(?:the\s+)?(\d+)\s+([a-zA-Z0-9_\-]+)\s+(?:with|having|by)?\s+(?:the\s+)?(highest|lowest|max|maximum|min|minimum|least|most|top|bottom|best|worst)\b",
+            q_lower,
+        )
+        m_n_word_dim = re.search(
+            r"\b(?:the\s+)?(\d+)\s+(highest|lowest|max|maximum|min|minimum|least|most|top|bottom|best|worst)\s+([a-zA-Z0-9_\-]+)\b",
+            q_lower,
+        )
+
+        rank_word: str | None = None
+        limit_val: int | None = None
+        cand_dim: str | None = None
+
+        if m_top:
+            rank_word = m_top.group(1)
+            limit_val = int(m_top.group(2))
+            cand_dim = m_top.group(3)
+        elif m_n_dim:
+            limit_val = int(m_n_dim.group(1))
+            cand_dim = m_n_dim.group(2)
+            rank_word = m_n_dim.group(3)
+        elif m_n_word_dim:
+            limit_val = int(m_n_word_dim.group(1))
+            rank_word = m_n_word_dim.group(2)
+            cand_dim = m_n_word_dim.group(3)
+
+        if rank_word and limit_val is not None:
+            dir_enum = (
+                SortDirection.DESC
+                if rank_word in ("top", "best", "highest", "max", "maximum", "most")
+                else SortDirection.ASC
+            )
+            resolved_dim = self._resolve_dim_candidate(cand_dim, cols) if cand_dim else None
+            if not resolved_dim:
+                m_dim_after = re.search(
+                    r"\b(?:by|per|across|for\s+each)\s+([a-zA-Z0-9_\-]+)\b", q_lower
+                )
+                if m_dim_after:
+                    resolved_dim = self._resolve_dim_candidate(m_dim_after.group(1), cols)
+
+            if resolved_dim:
+                matched_num_cols = [
+                    c
+                    for c, p in cols.items()
+                    if self._is_numeric(p)
+                    and re.search(rf"\b{re.escape(c.lower())}\b", q_lower)
+                    and c != resolved_dim
+                ]
+                if len(matched_num_cols) == 1:
+                    target_col = matched_num_cols[0]
+                    if any(k in q_lower for k in ("total", "sum")):
+                        agg_type = AggregationType.SUM
+                    elif any(k in q_lower for k in ("average", "avg", "mean")):
+                        agg_type = AggregationType.AVG
+                    elif any(k in q_lower for k in ("min", "minimum")) and rank_word not in (
+                        "min",
+                        "minimum",
+                    ):
+                        agg_type = AggregationType.MIN
+                    elif any(k in q_lower for k in ("max", "maximum")) and rank_word not in (
+                        "max",
+                        "maximum",
+                    ):
+                        agg_type = AggregationType.MAX
+                    else:
+                        agg_type = AggregationType.SUM
+
+                    metric_name = (
+                        f"total_{target_col}"
+                        if agg_type == AggregationType.SUM
+                        else f"{agg_type.value.lower()}_{target_col}"
+                    )
+
+                    time_constraints: list[TimeConstraint] = []
+                    year_match = re.search(r"\b(?:in|for|during)\s+(20\d\d|19\d\d)\b", q_lower)
+                    if year_match:
+                        year = int(year_match.group(1))
+                        temporal_cols = [c for c, p in cols.items() if p.is_temporal]
+                        date_col = (
+                            "order_date"
+                            if "order_date" in temporal_cols
+                            else (temporal_cols[0] if temporal_cols else None)
+                        )
+                        if date_col:
+                            time_constraints.append(
+                                TimeConstraint(
+                                    column=date_col,
+                                    start_time=f"{year}-01-01",
+                                    end_time=f"{year + 1}-01-01",
+                                    is_half_open=True,
+                                )
+                            )
+
+                    metric_spec = MetricSpec(
+                        name=metric_name,
+                        aggregation=agg_type,
+                        column=target_col,
+                    )
+                    ranking_spec = RankingSpec(
+                        mode=RankingMode.TOP_N_EXACT,
+                        metric=metric_name,
+                        direction=dir_enum,
+                        limit=limit_val,
+                        secondary_keys=[
+                            OrderBySpec(column=resolved_dim, direction=SortDirection.ASC)
+                        ],
+                    )
+                    order_by = [f"{metric_name} {dir_enum.value}", f"{resolved_dim} ASC"]
+
+                    return QuerySpecification(
+                        raw_question=question,
+                        table_name=target_table,
+                        metrics=[metric_spec],
+                        dimensions=[resolved_dim],
+                        time_constraints=time_constraints,
+                        order_by=order_by,
+                        limit=limit_val,
+                        ranking_spec=ranking_spec,
+                    )
+
+        # Fast-Path B: Single Extremum Ranking Questions
+        # e.g. "Find the sub_category with the highest SUM(sales)"
+        m_find_ext = re.search(
+            r"\b(?:find\s+the|which)\s+([a-zA-Z0-9_\-]+)\s+(?:has|had|with)\s+the\s+(highest|lowest|max|maximum|min|minimum)\s+(?:sum|total|avg|average|min|max)?\s*\(?([a-zA-Z0-9_]+)\)?",
+            q_lower,
+        )
+        if m_find_ext:
+            cand_dim = m_find_ext.group(1)
+            ext_word = m_find_ext.group(2)
+            cand_col = m_find_ext.group(3)
+            resolved_dim = self._resolve_dim_candidate(cand_dim, cols)
+            resolved_col = self._resolve_col(cand_col, cols)
+            if resolved_dim and resolved_col and self._is_numeric(cols[resolved_col]):
+                dir_enum = (
+                    SortDirection.DESC
+                    if ext_word in ("highest", "max", "maximum")
+                    else SortDirection.ASC
+                )
+                agg_type = AggregationType.SUM
+                metric_name = (
+                    f"total_{resolved_col}" if "total" in q_lower else f"sum_{resolved_col}"
+                )
+                metric_spec = MetricSpec(
+                    name=metric_name,
+                    aggregation=agg_type,
+                    column=resolved_col,
+                )
+                ranking_spec = RankingSpec(
+                    mode=RankingMode.ENTITY_EXTREMUM,
+                    metric=metric_name,
+                    direction=dir_enum,
+                    limit=1,
+                    secondary_keys=[OrderBySpec(column=resolved_dim, direction=SortDirection.ASC)],
+                )
+                order_by = [f"{metric_name} {dir_enum.value}", f"{resolved_dim} ASC"]
+                return QuerySpecification(
+                    raw_question=question,
+                    table_name=target_table,
+                    metrics=[metric_spec],
+                    dimensions=[resolved_dim],
+                    time_constraints=[],
+                    order_by=order_by,
+                    limit=1,
+                    ranking_spec=ranking_spec,
+                )
 
         # Condition 5: Rejection of noise, multi-clause, or ranking constructs
         rejection_tokens = [
-            " and ", " or ", " vs ", "versus", "growth", "difference",
-            "compare", "top ", "bottom ", "best ", "worst ", "highest ", "lowest ",
-            "last month", "recent", "why did", "trend", "ratio of",
+            " and ",
+            " or ",
+            " vs ",
+            "versus",
+            "growth",
+            "difference",
+            "compare",
+            "top ",
+            "bottom ",
+            "best ",
+            "worst ",
+            "highest ",
+            "lowest ",
+            "last month",
+            "recent",
+            "why did",
+            "trend",
+            "ratio of",
         ]
         if any(tok in q_lower for tok in rejection_tokens):
             return None
-
-        cols = profile.columns
 
         # Ambiguity check: "total number of <column>" where column is a numeric metric (e.g. sales)
         # Combines "total" (SUM) and "number of" (COUNT) on a numeric metric -> reject as ambiguous
@@ -408,14 +650,6 @@ class IntentParser:
         """
         valid_cols = profile.columns
 
-        # Gate 0: Rankings, limits, or sort orders are not supported by Stage 3 NumericalValidator
-        q_raw = (spec.raw_question or "").lower()
-        ranking_triggers = [
-            "highest", "lowest", "top ", "bottom ", "best ", "worst ", "most ", "least ",
-        ]
-        if spec.limit is not None or spec.order_by or any(rt in q_raw for rt in ranking_triggers):
-            return None
-
         # Gate 1: Metrics
         if not spec.metrics:
             return None
@@ -517,9 +751,7 @@ class IntentParser:
                 return None
             if f.value is None or (isinstance(f.value, str) and f.value.lower() == "null"):
                 return None
-            validated_filters.append(
-                FilterSpec(column=res_fc, operator=clean_op, value=f.value)
-            )
+            validated_filters.append(FilterSpec(column=res_fc, operator=clean_op, value=f.value))
 
         # Gate 4: Time Constraints
         validated_tc: list[TimeConstraint] = []
@@ -545,15 +777,81 @@ class IntentParser:
                 )
             )
 
+        # Gate 5: Limit and Order By
+        validated_limit: int | None = None
+        if spec.limit is not None:
+            if not isinstance(spec.limit, int) or spec.limit <= 0:
+                return None
+            validated_limit = spec.limit
+
+        validated_order_by: list[str] = []
+        if spec.order_by:
+            metric_names = {m.name.lower() for m in validated_metrics}
+            for ob in spec.order_by:
+                if not isinstance(ob, str) or not ob.strip():
+                    return None
+                parts = ob.strip().split()
+                col_part = parts[0]
+                if not (
+                    self._resolve_col(col_part, valid_cols) or col_part.lower() in metric_names
+                ):
+                    return None
+                if len(parts) > 1 and parts[1].upper() not in ("ASC", "DESC"):
+                    return None
+                validated_order_by.append(ob.strip())
+
+        # Gate 6: Ranking Specification
+        validated_ranking: RankingSpec | None = None
+        if spec.ranking_spec is not None:
+            rk = spec.ranking_spec
+            if not isinstance(rk.mode, RankingMode) or not isinstance(rk.direction, SortDirection):
+                return None
+            if rk.limit is not None and (not isinstance(rk.limit, int) or rk.limit <= 0):
+                return None
+            metric_names = {m.name.lower() for m in validated_metrics}
+            rk_metric_name: str | None = None
+            if isinstance(rk.metric, MetricSpec):
+                rk_metric_name = rk.metric.name
+            elif isinstance(rk.metric, str):
+                rk_metric_name = rk.metric
+            if rk_metric_name:
+                if not (
+                    self._resolve_col(rk_metric_name, valid_cols)
+                    or rk_metric_name.lower() in metric_names
+                ):
+                    return None
+            validated_ranking = rk
+
+        # Gate 7: Deterministic secondary ordering for grouped ranking queries
+        if validated_dims and (validated_limit is not None or validated_ranking is not None):
+            if validated_ranking:
+                sec_cols = {sk.column.lower() for sk in (validated_ranking.secondary_keys or [])}
+                new_sec_keys = list(validated_ranking.secondary_keys or [])
+                for d in validated_dims:
+                    if d.lower() not in sec_cols:
+                        new_sec_keys.append(OrderBySpec(column=d, direction=SortDirection.ASC))
+                        sec_cols.add(d.lower())
+                validated_ranking.secondary_keys = new_sec_keys
+
+            ob_cols = {ob.split()[0].lower() for ob in validated_order_by}
+            for d in validated_dims:
+                if d.lower() not in ob_cols:
+                    validated_order_by.append(f"{d} ASC")
+                    ob_cols.add(d.lower())
+
         return QuerySpecification(
             raw_question=spec.raw_question,
             table_name=profile.table_name,
             metrics=validated_metrics,
             dimensions=validated_dims,
+            dimension_specs=spec.dimension_specs,
             filters=validated_filters,
             time_constraints=validated_tc,
-            order_by=spec.order_by,
-            limit=spec.limit,
+            order_by=validated_order_by,
+            limit=validated_limit,
+            ranking_spec=validated_ranking,
+            is_grounded=True,
+            intent_reliability=getattr(spec, "intent_reliability", IntentReliability.HIGH),
         )
 
     def _resolve_col(self, col_name: str, valid_cols: dict[str, Any]) -> str | None:

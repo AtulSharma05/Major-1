@@ -9,9 +9,7 @@ import sys
 
 def test_python_version_minimum():
     """Verify that Python runtime is at least version 3.10."""
-    assert sys.version_info >= (3, 10), (
-        f"Python 3.10+ is required, but running under {sys.version}"
-    )
+    assert sys.version_info >= (3, 10), f"Python 3.10+ is required, but running under {sys.version}"
 
 
 def test_core_package_structure():
@@ -27,4 +25,3 @@ def test_repo_root_fixture(repo_root, data_dir):
     assert repo_root.exists(), "Repo root path does not exist"
     assert (repo_root / "pyproject.toml").exists(), "pyproject.toml not found in repo root"
     assert data_dir.exists(), "data/ directory not found in repo root"
-

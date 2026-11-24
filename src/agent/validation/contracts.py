@@ -82,6 +82,12 @@ def _deep_freeze(v: Any) -> Any:
     if _NUMPY_SCALAR_TYPES and isinstance(v, _NUMPY_SCALAR_TYPES):
         scalar_val = v.item() if hasattr(v, "item") else v
         return _deep_freeze(scalar_val)
+    if isinstance(v, BaseModel):
+        if getattr(v, "model_config", {}).get("frozen"):
+            return v
+        return MappingProxyType(
+            {_freeze_key(k): _deep_freeze(val) for k, val in v.model_dump().items()}
+        )
     if isinstance(v, _IMMUTABLE_PRIMITIVES):
         return v
     raise TypeError(f"Unsupported mutable or unfreezable type: {type(v).__name__}")
@@ -98,6 +104,8 @@ def _deep_unfreeze(v: Any) -> Any:
         return [_deep_unfreeze(x) for x in v]
     if isinstance(v, (set, frozenset)):
         return [_deep_unfreeze(x) for x in v]
+    if isinstance(v, BaseModel):
+        return v.model_dump()
     return v
 
 
@@ -202,6 +210,44 @@ class NumericalValidationResult(LayerValidationResult):
         return _deep_unfreeze(v)
 
 
+class SemanticCheckDetail(BaseModel):
+    """Result of an individual canonical semantic check (deeply frozen/immutable)."""
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    check_name: str
+    status: ValidationStatus
+    passed: bool
+    diagnostic_code: str | None = None
+    explanation: str = ""
+    intent_evidence: Mapping[Any, Any] = Field(default_factory=dict)
+    ast_evidence: Mapping[Any, Any] = Field(default_factory=dict)
+    expected_vs_observed: Mapping[Any, Any] = Field(default_factory=dict)
+
+    @field_validator("intent_evidence", "ast_evidence", "expected_vs_observed", mode="after")
+    @classmethod
+    def _freeze_check_mappings(cls, v: Any) -> Any:
+        return _deep_freeze(v)
+
+    @field_serializer("intent_evidence", "ast_evidence", "expected_vs_observed")
+    def _serialize_check_mappings(self, v: Any) -> dict[Any, Any]:
+        return _deep_unfreeze(v)
+
+
+CANONICAL_SEMANTIC_CHECKS: frozenset[str] = frozenset(
+    {
+        "check_table_grounding",
+        "check_column_grounding",
+        "check_aggregation_level",
+        "check_metric_correctness",
+        "check_filter_semantics",
+        "check_join_integrity",
+        "check_ordering_and_ranking",
+        "check_projection_contract",
+    }
+)
+
+
 class SemanticValidationResult(LayerValidationResult):
     """Layer 3: Scope-aware AST semantic coverage outcome."""
 
@@ -214,6 +260,14 @@ class SemanticValidationResult(LayerValidationResult):
     missing_filters: tuple[str, ...] = Field(default_factory=tuple)
     temporal_boundary_valid: bool = True
     inconclusive_reason: str | None = None
+    checks: tuple[SemanticCheckDetail, ...] = Field(default_factory=tuple)
+    canonical_projection: Any = None
+    intent_reliability: Any = None
+
+    @field_validator("checks", mode="after")
+    @classmethod
+    def _freeze_checks(cls, v: Any) -> Any:
+        return tuple(v) if isinstance(v, (list, tuple)) else v
 
 
 class CorrectionDiagnostic(BaseModel):
@@ -423,6 +477,123 @@ def determine_step_confidence(
     return ConfidenceLevel.LOW
 
 
+def synthesize_diagnostic(
+    execution_res: ExecutionValidationResult,
+    numerical_res: NumericalValidationResult,
+    semantic_res: SemanticValidationResult,
+    raw_execution_result: ExecutionResult | None = None,
+    diagnostic: CorrectionDiagnostic | None = None,
+    executed_sql: str | None = None,
+    attempt_number: int = 1,
+) -> CorrectionDiagnostic | None:
+    """Synthesize a structured CorrectionDiagnostic when diagnostic is None or needs completion."""
+    if diagnostic is not None:
+        return diagnostic
+
+    status = determine_step_status(
+        execution_res=execution_res,
+        numerical_res=numerical_res,
+        semantic_res=semantic_res,
+        raw_execution_result=raw_execution_result,
+    )
+
+    if status == ValidationStatus.VERIFIED:
+        return None
+
+    sql_text = executed_sql or ""
+
+    # Priority 1: Layer 1 Execution Failure
+    if not execution_res.passed or execution_res.status == ValidationStatus.FAILED:
+        err_msg = execution_res.message or "Execution failed"
+        is_fatal = (
+            raw_execution_result is None
+            or "timeout" in err_msg.lower()
+            or "fatal" in err_msg.lower()
+        )
+        cat = ErrorCategory.FATAL_SYSTEM if is_fatal else ErrorCategory.SYNTAX_ERROR
+        return CorrectionDiagnostic(
+            error_category=cat,
+            is_correctable=not is_fatal,
+            failed_layer="Layer 1: Execution",
+            error_summary=err_msg,
+            remediation_instruction=(
+                "Fix SQL syntax, function calls, or schema references according to DuckDB dialect."
+            ),
+            prior_attempt_sql=sql_text,
+            attempt_number=attempt_number,
+        )
+
+    # Priority 2: Layer 2 Numerical Failure
+    if numerical_res.status == ValidationStatus.FAILED:
+        err_msg = numerical_res.message or "Numerical validation failed"
+        return CorrectionDiagnostic(
+            error_category=ErrorCategory.NUMERICAL_MISMATCH,
+            is_correctable=True,
+            failed_layer="Layer 2: Numerical",
+            error_summary=err_msg,
+            remediation_instruction=(
+                "Ensure calculation matches intent: verify aggregation expressions, "
+                "filtering intervals, group-by dimensions, and sorting directions."
+            ),
+            prior_attempt_sql=sql_text,
+            attempt_number=attempt_number,
+        )
+
+    # Priority 3: Layer 3 Semantic Failure
+    if semantic_res.status == ValidationStatus.FAILED:
+        failed_checks = [c for c in semantic_res.checks if not c.passed]
+        check_names = [c.check_name for c in failed_checks]
+        explanations = [c.explanation for c in failed_checks if c.explanation]
+        summary = f"Semantic checks failed: {', '.join(check_names)}. " + (
+            "; ".join(explanations) if explanations else semantic_res.message
+        )
+        has_temporal_fail = not semantic_res.temporal_boundary_valid or any(
+            "filter" in c.check_name for c in failed_checks
+        )
+        cat = (
+            ErrorCategory.INTERVAL_LEAK
+            if has_temporal_fail and "interval" in summary.lower()
+            else ErrorCategory.SEMANTIC_OMISSION
+        )
+        fix_target = "; ".join(explanations) or semantic_res.message
+        return CorrectionDiagnostic(
+            error_category=cat,
+            is_correctable=True,
+            failed_layer="Layer 3: Semantic",
+            error_summary=summary,
+            remediation_instruction=(f"Align SQL AST with structured intent: {fix_target}"),
+            prior_attempt_sql=sql_text,
+            attempt_number=attempt_number,
+        )
+
+    # Priority 4: Inconclusive
+    if status == ValidationStatus.INCONCLUSIVE:
+        inc_reason = (
+            semantic_res.inconclusive_reason
+            or numerical_res.inconclusive_reason
+            or "Validation inconclusive due to ambiguous data or unverifiable intent."
+        )
+        inc_layer = (
+            "Layer 3: Semantic"
+            if semantic_res.status == ValidationStatus.INCONCLUSIVE
+            else "Layer 2: Numerical"
+        )
+        return CorrectionDiagnostic(
+            error_category=ErrorCategory.AMBIGUOUS_DATA,
+            is_correctable=False,  # Inconclusive is strictly NOT correctable
+            failed_layer=inc_layer,
+            error_summary=inc_reason,
+            remediation_instruction=(
+                "Intent or data is ambiguous/unprovable. Automatic correction cannot resolve "
+                "ambiguity."
+            ),
+            prior_attempt_sql=sql_text,
+            attempt_number=attempt_number,
+        )
+
+    return None
+
+
 def build_step_validation_result(
     step_id: int,
     attempt_number: int,
@@ -487,6 +658,18 @@ def build_step_validation_result(
     )
     overall_passed = status == ValidationStatus.VERIFIED
 
+    effective_diagnostic = diagnostic
+    if effective_diagnostic is None:
+        effective_diagnostic = synthesize_diagnostic(
+            execution_res=execution_res,
+            numerical_res=numerical_res,
+            semantic_res=semantic_res,
+            raw_execution_result=raw_execution_result,
+            diagnostic=None,
+            executed_sql=executed_sql,
+            attempt_number=attempt_number,
+        )
+
     return StepValidationResult(
         step_id=step_id,
         attempt_number=attempt_number,
@@ -496,7 +679,7 @@ def build_step_validation_result(
         execution_result=execution_res,
         numerical_result=numerical_res,
         semantic_result=semantic_res,
-        diagnostic=diagnostic,
+        diagnostic=effective_diagnostic,
         executed_sql=executed_sql,
         raw_execution_result=raw_execution_result,
         notes=tuple(notes) if notes else (),

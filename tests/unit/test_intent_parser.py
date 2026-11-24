@@ -44,6 +44,7 @@ def superstore_profile() -> TableProfile:
             "customer_id": ["C1", "C2", "C3", "C4"],
             "region": ["East", "West", "East", "Central"],
             "category": ["Technology", "Furniture", "Technology", "Office Supplies"],
+            "sub_category": ["Phones", "Chairs", "Accessories", "Paper"],
             "sales": [100.50, 250.00, 300.25, 45.00],
             "profit": [20.10, -15.00, 80.50, 5.00],
             "quantity": [2, 5, 3, 1],
@@ -177,24 +178,27 @@ def test_reject_unsupported_aggregation(superstore_profile: TableProfile):
 
 def test_multi_step_decomposition_independent_specs(superstore_profile: TableProfile):
     """Requirement 7: Multi-step comparison produces independent atomic specifications."""
+
     class MockClient:
         def generate(self, *args, **kwargs):
-            return json.dumps({
-                "steps": [
-                    {
-                        "step_id": 1,
-                        "question": "What is the total sales in 2016?",
-                        "target_table": "superstore",
-                        "depends_on": [],
-                    },
-                    {
-                        "step_id": 2,
-                        "question": "What is the total sales in 2017?",
-                        "target_table": "superstore",
-                        "depends_on": [],
-                    },
-                ]
-            })
+            return json.dumps(
+                {
+                    "steps": [
+                        {
+                            "step_id": 1,
+                            "question": "What is the total sales in 2016?",
+                            "target_table": "superstore",
+                            "depends_on": [],
+                        },
+                        {
+                            "step_id": 2,
+                            "question": "What is the total sales in 2017?",
+                            "target_table": "superstore",
+                            "depends_on": [],
+                        },
+                    ]
+                }
+            )
 
     planner = QueryPlanner(client=MockClient())
     plan = planner.plan(
@@ -437,10 +441,12 @@ class MockLLMClient:
 
 def test_llm_path_rejects_nonexistent_column(superstore_profile: TableProfile):
     """LLM extraction returning a nonexistent column is rejected by the validation gate."""
-    mock_response = json.dumps({
-        "table_name": "superstore",
-        "metrics": [{"name": "fake", "aggregation": "SUM", "column": "nonexistent_col"}],
-    })
+    mock_response = json.dumps(
+        {
+            "table_name": "superstore",
+            "metrics": [{"name": "fake", "aggregation": "SUM", "column": "nonexistent_col"}],
+        }
+    )
     parser = IntentParser(client=MockLLMClient(mock_response))
     # Direct question that skips heuristics
     assert parser.parse("Analyze nonexistent metrics", "superstore", superstore_profile) is None
@@ -448,26 +454,32 @@ def test_llm_path_rejects_nonexistent_column(superstore_profile: TableProfile):
 
 def test_llm_path_rejects_unsupported_aggregation(superstore_profile: TableProfile):
     """LLM extraction returning an unsupported aggregation (e.g. MEDIAN) is rejected."""
-    mock_response = json.dumps({
-        "table_name": "superstore",
-        "metrics": [{"name": "med", "aggregation": "MEDIAN", "column": "sales"}],
-    })
+    mock_response = json.dumps(
+        {
+            "table_name": "superstore",
+            "metrics": [{"name": "med", "aggregation": "MEDIAN", "column": "sales"}],
+        }
+    )
     parser = IntentParser(client=MockLLMClient(mock_response))
     assert parser.parse("Analyze median sales", "superstore", superstore_profile) is None
 
 
 def test_llm_path_rejects_ambiguous_date_constraints(ambiguous_date_profile: TableProfile):
     """LLM extraction targeting an ambiguous date column is rejected."""
-    mock_response = json.dumps({
-        "table_name": "ambig_table",
-        "metrics": [{"name": "total_sales", "aggregation": "SUM", "column": "sales"}],
-        "time_constraints": [{
-            "column": "order_date",
-            "start_time": "2020-01-01",
-            "end_time": "2021-01-01",
-            "is_half_open": True,
-        }],
-    })
+    mock_response = json.dumps(
+        {
+            "table_name": "ambig_table",
+            "metrics": [{"name": "total_sales", "aggregation": "SUM", "column": "sales"}],
+            "time_constraints": [
+                {
+                    "column": "order_date",
+                    "start_time": "2020-01-01",
+                    "end_time": "2021-01-01",
+                    "is_half_open": True,
+                }
+            ],
+        }
+    )
     parser = IntentParser(client=MockLLMClient(mock_response))
     res = parser.parse("Sales during fiscal year 2020", "ambig_table", ambiguous_date_profile)
     assert res is None
@@ -475,43 +487,53 @@ def test_llm_path_rejects_ambiguous_date_constraints(ambiguous_date_profile: Tab
 
 def test_llm_path_rejects_invalid_filter_operators(superstore_profile: TableProfile):
     """LLM extraction with invalid/injection filter operators is rejected."""
-    mock_response = json.dumps({
-        "table_name": "superstore",
-        "metrics": [{"name": "total_sales", "aggregation": "SUM", "column": "sales"}],
-        "filters": [{"column": "category", "operator": "DROP TABLE", "value": "Furniture"}],
-    })
+    mock_response = json.dumps(
+        {
+            "table_name": "superstore",
+            "metrics": [{"name": "total_sales", "aggregation": "SUM", "column": "sales"}],
+            "filters": [{"column": "category", "operator": "DROP TABLE", "value": "Furniture"}],
+        }
+    )
     parser = IntentParser(client=MockLLMClient(mock_response))
     assert parser.parse("Sales for furniture category", "superstore", superstore_profile) is None
 
 
 def test_llm_path_rejects_unsafe_custom_formulas(superstore_profile: TableProfile):
     """LLM extraction with unsafe custom formula is rejected."""
-    mock_response = json.dumps({
-        "table_name": "superstore",
-        "metrics": [{
-            "name": "custom_metric",
-            "aggregation": "CUSTOM",
-            "formula": "SUM(profit) + eval('__import__(\"os\").system(\"ls\")')",
-        }],
-    })
+    mock_response = json.dumps(
+        {
+            "table_name": "superstore",
+            "metrics": [
+                {
+                    "name": "custom_metric",
+                    "aggregation": "CUSTOM",
+                    "formula": 'SUM(profit) + eval(\'__import__("os").system("ls")\')',
+                }
+            ],
+        }
+    )
     parser = IntentParser(client=MockLLMClient(mock_response))
     assert parser.parse("Evaluate custom formula", "superstore", superstore_profile) is None
 
 
 def test_llm_path_valid_spec_passes_gate(superstore_profile: TableProfile):
     """Valid LLM extraction passes the common validation gate and returns typed spec."""
-    mock_response = json.dumps({
-        "table_name": "superstore",
-        "metrics": [{"name": "avg_profit", "aggregation": "AVG", "column": "profit"}],
-        "dimensions": ["category"],
-        "filters": [{"column": "region", "operator": "=", "value": "West"}],
-        "time_constraints": [{
-            "column": "order_date",
-            "start_time": "2017-01-01",
-            "end_time": "2018-01-01",
-            "is_half_open": True,
-        }],
-    })
+    mock_response = json.dumps(
+        {
+            "table_name": "superstore",
+            "metrics": [{"name": "avg_profit", "aggregation": "AVG", "column": "profit"}],
+            "dimensions": ["category"],
+            "filters": [{"column": "region", "operator": "=", "value": "West"}],
+            "time_constraints": [
+                {
+                    "column": "order_date",
+                    "start_time": "2017-01-01",
+                    "end_time": "2018-01-01",
+                    "is_half_open": True,
+                }
+            ],
+        }
+    )
     parser = IntentParser(client=MockLLMClient(mock_response))
     q = "Filter and analyze: profit by category for West in 2017"
     spec = parser.parse(q, "superstore", superstore_profile)
@@ -525,3 +547,89 @@ def test_llm_path_valid_spec_passes_gate(superstore_profile: TableProfile):
     assert spec.filters[0].value == "West"
     assert len(spec.time_constraints) == 1
     assert spec.time_constraints[0].start_time == "2017-01-01"
+
+
+# --- 14. Top-N and Extremum Intent Extraction & Gate Tests ---
+
+
+def test_parse_top_5_subcategories_by_sales_in_2017(superstore_profile: TableProfile):
+    """Verify heuristic extraction of Top-N query with dimension and date constraints."""
+    parser = IntentParser()
+    q = "What were the top 5 sub-categories by total sales in 2017?"
+    spec = parser.parse(q, "superstore", superstore_profile)
+
+    assert spec is not None
+    assert spec.table_name == "superstore"
+    assert len(spec.metrics) == 1
+    assert spec.metrics[0].aggregation == AggregationType.SUM
+    assert spec.metrics[0].column == "sales"
+    assert spec.dimensions == ["sub_category"]
+    assert len(spec.time_constraints) == 1
+    assert spec.time_constraints[0].start_time == "2017-01-01"
+    assert spec.time_constraints[0].end_time == "2018-01-01"
+    assert spec.limit == 5
+    assert spec.order_by is not None
+    assert any("DESC" in ob for ob in spec.order_by)
+    assert spec.ranking_spec is not None
+    assert spec.ranking_spec.limit == 5
+
+
+def test_parse_bottom_3_categories_by_profit(superstore_profile: TableProfile):
+    """Verify heuristic extraction of bottom N query with ASC direction."""
+    parser = IntentParser()
+    q = "What were the bottom 3 categories by total profit?"
+    spec = parser.parse(q, "superstore", superstore_profile)
+
+    assert spec is not None
+    assert spec.table_name == "superstore"
+    assert spec.metrics[0].aggregation == AggregationType.SUM
+    assert spec.metrics[0].column == "profit"
+    assert spec.dimensions == ["category"]
+    assert spec.limit == 3
+    assert spec.ranking_spec is not None
+    assert spec.ranking_spec.limit == 3
+
+
+def test_parse_extremum_highest_sales(superstore_profile: TableProfile):
+    """Verify single extremum ranking query produces limit=1 and ENTITY_EXTREMUM."""
+    parser = IntentParser()
+    q = "Find the category with the highest SUM(sales)"
+    spec = parser.parse(q, "superstore", superstore_profile)
+
+    assert spec is not None
+    assert spec.table_name == "superstore"
+    assert spec.metrics[0].aggregation == AggregationType.SUM
+    assert spec.metrics[0].column == "sales"
+    assert spec.dimensions == ["category"]
+    assert spec.limit == 1
+    assert spec.ranking_spec is not None
+    assert spec.ranking_spec.limit == 1
+
+
+def test_llm_path_valid_ranking_passes_gate(superstore_profile: TableProfile):
+    """Valid LLM extraction with limit and ranking_spec passes the common validation gate."""
+    mock_response = json.dumps(
+        {
+            "table_name": "superstore",
+            "metrics": [{"name": "total_sales", "aggregation": "SUM", "column": "sales"}],
+            "dimensions": ["category"],
+            "order_by": ["total_sales DESC", "category ASC"],
+            "limit": 5,
+            "ranking_spec": {
+                "mode": "TOP_N_EXACT",
+                "metric": "total_sales",
+                "direction": "DESC",
+                "limit": 5,
+                "secondary_keys": [{"column": "category", "direction": "ASC"}],
+            },
+        }
+    )
+    parser = IntentParser(client=MockLLMClient(mock_response))
+    q = "Top categories analysis"
+    spec = parser.parse(q, "superstore", superstore_profile)
+    assert spec is not None
+    assert spec.limit == 5
+    assert spec.order_by == ["total_sales DESC", "category ASC"]
+    assert spec.ranking_spec is not None
+    assert spec.ranking_spec.limit == 5
+    assert spec.is_grounded is True

@@ -110,4 +110,3 @@ def test_single_step_top_subcategories(ollama_available, setup_engine):
     result = engine.execute(sql)
     assert result.success is True, f"Execution failed: {result.error_message} (SQL: {sql})"
     assert result.row_count <= 3
-

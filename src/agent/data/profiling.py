@@ -20,6 +20,7 @@ Key Responsibilities of this Module:
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 
 import pandas as pd
@@ -52,9 +53,7 @@ def detect_date_format_and_pattern(
         return False, None, None
 
     iso_pat = re.compile(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}(\s+\d{1,2}:\d{2}(:\d{2})?)?$")
-    dmy_mdy_pat = re.compile(
-        r"^(\d{1,2})([-/])(\d{1,2})\2(\d{4})(\s+\d{1,2}:\d{2}(:\d{2})?)?$"
-    )
+    dmy_mdy_pat = re.compile(r"^(\d{1,2})([-/])(\d{1,2})\2(\d{4})(\s+\d{1,2}:\d{2}(:\d{2})?)?$")
 
     iso_matches = 0
     dmy_mdy_matches: list[tuple[int, str, int, int, bool]] = []
@@ -152,7 +151,11 @@ class TableProfile(BaseModel):
     columns: dict[str, ColumnProfile]
 
 
-def profile_table(db: SessionDatabase, table_name: str) -> TableProfile:
+def profile_table(
+    db: SessionDatabase,
+    table_name: str,
+    force_refresh: bool = False,
+) -> TableProfile:
     """Inspect and profile a registered DuckDB table using vectorized in-engine queries.
 
     Methodology:
@@ -174,6 +177,7 @@ def profile_table(db: SessionDatabase, table_name: str) -> TableProfile:
     Args:
         db: Active `SessionDatabase` containing registered tables.
         table_name: Identifier of the table to inspect.
+        force_refresh: Whether to bypass the profile cache and recompute.
 
     Returns:
         Populated `TableProfile` instance.
@@ -182,15 +186,25 @@ def profile_table(db: SessionDatabase, table_name: str) -> TableProfile:
     if not db.is_table_allowed(clean_table):
         raise ValueError(f"Table '{table_name}' is not registered in session allowlist")
 
+    if not force_refresh and hasattr(db, "_table_profiles") and clean_table in db._table_profiles:
+        return db._table_profiles[clean_table]
+
+    def _safe_query_df(sql: str, retries: int = 3) -> pd.DataFrame:
+        for attempt in range(retries):
+            try:
+                return db.query_df(sql)
+            except Exception as exc:
+                if "busy with another call" in str(exc) and attempt < retries - 1:
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                raise
+
     # Step 1: Extract column names and native DuckDB types via PRAGMA
-    info_df = db.query_df(f"PRAGMA table_info('{clean_table}')")
-    cols_meta = [
-        {"name": row["name"], "type": row["type"]}
-        for _, row in info_df.iterrows()
-    ]
+    info_df = _safe_query_df(f"PRAGMA table_info('{clean_table}')")
+    cols_meta = [{"name": row["name"], "type": row["type"]} for _, row in info_df.iterrows()]
 
     # Step 2: Retrieve total row count
-    count_df = db.query_df(f"SELECT COUNT(*) AS total_rows FROM {clean_table}")
+    count_df = _safe_query_df(f"SELECT COUNT(*) AS total_rows FROM {clean_table}")
     total_rows = int(count_df["total_rows"].iloc[0])
 
     profiles: dict[str, ColumnProfile] = {}
@@ -226,7 +240,7 @@ def profile_table(db: SessionDatabase, table_name: str) -> TableProfile:
                 COUNT(DISTINCT {quoted_col}) AS distinct_count
             FROM {clean_table}
         """
-        stats_df = db.query_df(stats_sql)
+        stats_df = _safe_query_df(stats_sql)
         null_count = int(stats_df["null_count"].iloc[0])
         distinct_count = int(stats_df["distinct_count"].iloc[0])
         null_pct = round((null_count / total_rows) * 100.0, 2)
@@ -251,7 +265,7 @@ def profile_table(db: SessionDatabase, table_name: str) -> TableProfile:
                 LIMIT 20
             """
             try:
-                date_samples_df = db.query_df(sample_dates_sql)
+                date_samples_df = _safe_query_df(sample_dates_sql)
                 raw_date_samples = date_samples_df["val"].tolist()
                 is_t, d_fmt, strp_fmt = detect_date_format_and_pattern(raw_date_samples)
                 if is_t:
@@ -271,7 +285,7 @@ def profile_table(db: SessionDatabase, table_name: str) -> TableProfile:
                 WHERE {quoted_col} IS NOT NULL
             """
             try:
-                mm_df = db.query_df(minmax_sql)
+                mm_df = _safe_query_df(minmax_sql)
                 if not mm_df.empty:
                     min_val = mm_df["min_v"].iloc[0]
                     max_val = mm_df["max_v"].iloc[0]
@@ -289,7 +303,7 @@ def profile_table(db: SessionDatabase, table_name: str) -> TableProfile:
                 WHERE {quoted_col} IS NOT NULL
             """
             try:
-                mm_df = db.query_df(minmax_sql)
+                mm_df = _safe_query_df(minmax_sql)
                 if not mm_df.empty:
                     min_val = mm_df["min_v"].iloc[0]
                     max_val = mm_df["max_v"].iloc[0]
@@ -304,7 +318,7 @@ def profile_table(db: SessionDatabase, table_name: str) -> TableProfile:
                 WHERE {quoted_col} IS NOT NULL
             """
             try:
-                mm_df = db.query_df(minmax_sql)
+                mm_df = _safe_query_df(minmax_sql)
                 if not mm_df.empty:
                     min_val = mm_df["min_v"].iloc[0]
                     max_val = mm_df["max_v"].iloc[0]
@@ -319,7 +333,7 @@ def profile_table(db: SessionDatabase, table_name: str) -> TableProfile:
                 WHERE {quoted_col} IS NOT NULL
             """
             try:
-                mm_df = db.query_df(minmax_sql)
+                mm_df = _safe_query_df(minmax_sql)
                 if not mm_df.empty:
                     min_val = mm_df["min_v"].iloc[0]
                     max_val = mm_df["max_v"].iloc[0]
@@ -336,11 +350,10 @@ def profile_table(db: SessionDatabase, table_name: str) -> TableProfile:
             LIMIT 3
         """
         try:
-            samples_df = db.query_df(sample_sql)
+            samples_df = _safe_query_df(sample_sql)
             raw_samples = samples_df["val"].tolist()
             sample_values = [
-                str(v) if not isinstance(v, (int, float, bool)) else v
-                for v in raw_samples
+                str(v) if not isinstance(v, (int, float, bool)) else v for v in raw_samples
             ]
         except Exception:
             sample_values = []
@@ -363,12 +376,15 @@ def profile_table(db: SessionDatabase, table_name: str) -> TableProfile:
         )
 
     # Step 4: Return comprehensive TableProfile
-    return TableProfile(
+    result_profile = TableProfile(
         table_name=clean_table,
         row_count=total_rows,
         column_count=len(cols_meta),
         columns=profiles,
     )
+    if hasattr(db, "_table_profiles"):
+        db._table_profiles[clean_table] = result_profile
+    return result_profile
 
 
 def format_profile_for_prompt(profile: TableProfile, max_token_budget: int = 1200) -> str:
@@ -443,8 +459,7 @@ def format_profile_for_prompt(profile: TableProfile, max_token_budget: int = 120
         output += r
 
     ambiguous_cols = [
-        c.name for c in profile.columns.values()
-        if c.date_format and "AMBIGUOUS" in c.date_format
+        c.name for c in profile.columns.values() if c.date_format and "AMBIGUOUS" in c.date_format
     ]
     if ambiguous_cols:
         output += (

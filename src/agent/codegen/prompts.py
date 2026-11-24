@@ -23,9 +23,12 @@ CRITICAL RULES:
    - For distinct count, use COUNT(DISTINCT col).
    - For row count, use COUNT(*).
    - For Average Order Value (AOV), use: SUM(sales) / NULLIF(COUNT(DISTINCT order_id), 0).
-   - When ranking or finding the top entity by sales or profit:
-     Compute the total per entity: GROUP BY <entity_col> ORDER BY SUM(<metric_col>) DESC LIMIT 1.
-     Do NOT use one metric as a secondary sort criterion for another.
+   - When ranking top/bottom entities on grouped queries (Top N, Bottom N, highest, lowest):
+     Compute total per entity: GROUP BY <entity> ORDER BY <metric> <DIR>, <dim> ASC LIMIT N.
+     ALWAYS include the primary metric/direction FIRST, and then include ALL grouping
+     dimensions in ASC order as deterministic secondary tie-breakers:
+     (e.g., `ORDER BY total_sales ASC, sub_category ASC LIMIT 5`).
+     Do NOT use another arbitrary metric as a secondary sort criterion.
 5. TIMESTAMPS & DATES:
    - For period filters on DATE or TIMESTAMP columns, prefer half-open intervals:
      col >= 'YYYY-01-01' AND col < 'YYYY+1-01-01'
@@ -83,15 +86,33 @@ def build_sql_prompt(
                 "Perform product analysis using `category`."
             )
 
-    # Ranking aggregation guidance: ensure SUM is used rather than MAX
+    # Ranking aggregation guidance: ensure SUM is used and deterministic tie-breakers are included
     ranking_triggers = [
-        "highest sales", "top sales", "highest profit", "top profit",
-        "most sales", "most profit",
+        "highest sales",
+        "top sales",
+        "lowest sales",
+        "bottom sales",
+        "highest profit",
+        "top profit",
+        "lowest profit",
+        "bottom profit",
+        "most sales",
+        "least sales",
+        "most profit",
+        "least profit",
+        "top",
+        "bottom",
+        "highest",
+        "lowest",
+        "best",
+        "worst",
     ]
     if any(k in q_lower for k in ranking_triggers):
         guidance_notes.append(
-            "- Calculate total per entity using SUM(sales) / SUM(profit): "
-            "`GROUP BY <entity> ORDER BY <total_metric> DESC LIMIT 1`."
+            "- When ranking or using LIMIT with ORDER BY on grouped queries, ALWAYS include "
+            "the primary metric/direction followed by all grouping dimensions in ASC order as "
+            "deterministic secondary tie-breakers: `ORDER BY <metric> <DIR>, <dim1> ASC LIMIT N` "
+            "(e.g. `ORDER BY total_sales ASC, sub_category ASC LIMIT 5`)."
         )
 
     # Dynamic temporal column guidance
@@ -140,8 +161,7 @@ Valid columns in `{profile.table_name}`:
 
     if intent:
         metric_desc = ", ".join(
-            f"{m.aggregation.value}({m.column or '*'}) AS {m.name}"
-            for m in intent.metrics
+            f"{m.aggregation.value}({m.column or '*'}) AS {m.name}" for m in intent.metrics
         )
         time_desc_parts = []
         for tc in intent.time_constraints:
@@ -155,11 +175,12 @@ Valid columns in `{profile.table_name}`:
         prompt += f"""
 ### Structured Intent
 - Target Table: `{intent.table_name}`
-- Metrics: {metric_desc or 'Not specified'}
-- Group By Dimensions: {intent.dimensions or 'None (Scalar metric)'}
-- Filters: {[f"{f.column} {f.operator} {f.value}" for f in intent.filters] or 'None'}
-- Time Constraints: {time_desc or 'None'}
-- Limit: {intent.limit or 'None'}
+- Metrics: {metric_desc or "Not specified"}
+- Group By Dimensions: {intent.dimensions or "None (Scalar metric)"}
+- Filters: {[f"{f.column} {f.operator} {f.value}" for f in intent.filters] or "None"}
+- Time Constraints: {time_desc or "None"}
+- Order By: {intent.order_by or "None"}
+- Limit: {intent.limit or "None"}
 """
 
     if error_feedback:

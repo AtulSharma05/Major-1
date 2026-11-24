@@ -34,4 +34,3 @@ def test_ollama_service_connectivity():
             f"Ollama is reachable, but 'qwen2.5-coder:7b' is not yet downloaded. "
             f"Installed models: {available_models}. Run 'ollama pull qwen2.5-coder:7b'."
         )
-

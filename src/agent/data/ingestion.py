@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import io
 import re
+import threading
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -155,11 +156,17 @@ class SessionDatabase:
         # Connect to DuckDB in-memory instance
         self._con = duckdb.connect(database=db_path)
 
+        # Thread synchronization lock for safe concurrent operations
+        self._lock = threading.RLock()
+
         # Allowlist registry of table names registered during this session
         self._registered_tables: set[str] = set()
 
         # Metadata repository storing column mappings and original schema profiles
         self._table_metadata: dict[str, dict[str, Any]] = {}
+
+        # Cached TableProfile objects to eliminate redundant profiling
+        self._table_profiles: dict[str, Any] = {}
 
         # Source DataFrame repository for independent numerical validation (Stage 3)
         self._source_dataframes: dict[str, pd.DataFrame] = {}
@@ -168,6 +175,11 @@ class SessionDatabase:
     def connection(self) -> duckdb.DuckDBPyConnection:
         """Access the underlying DuckDB connection object."""
         return self._con
+
+    def cursor(self) -> duckdb.DuckDBPyConnection:
+        """Return a thread-isolated DuckDB cursor connection."""
+        with self._lock:
+            return self._con.cursor()
 
     def get_allowed_tables(self) -> list[str]:
         """Return a sorted list of table names currently registered in this session."""
@@ -241,10 +253,13 @@ class SessionDatabase:
         # Step: Materialize into DuckDB native storage
         # We register df_to_load temporarily and immediately create a physical DuckDB table.
         temp_view = f"_temp_{clean_table_name}"
-        self._con.register(temp_view, df_to_load)
-        create_sql = f"CREATE OR REPLACE TABLE {clean_table_name} AS SELECT * FROM {temp_view}"
-        self._con.execute(create_sql)
-        self._con.unregister(temp_view)
+        with self._lock:
+            cur = self._con.cursor()
+            cur.register(temp_view, df_to_load)
+            create_sql = f"CREATE OR REPLACE TABLE {clean_table_name} AS SELECT * FROM {temp_view}"
+            cur.execute(create_sql)
+            cur.unregister(temp_view)
+            self._table_profiles.pop(clean_table_name, None)
 
         # Step: Update session allowlist, source DataFrame store, and metadata
         self._registered_tables.add(clean_table_name)
@@ -390,16 +405,29 @@ class SessionDatabase:
         if not is_valid:
             raise PermissionError(f"Query validation rejected: {'; '.join(errors)}")
 
-        if params is not None:
-            return self._con.execute(sql_query, params)
-        return self._con.execute(sql_query)
+        with self._lock:
+            cur = self._con.cursor()
+            if params is not None:
+                return cur.execute(sql_query, params)
+            return cur.execute(sql_query)
 
     def query_df(self, sql_query: str, params: Any = None) -> pd.DataFrame:
         """Execute validated SQL query and return results as a Pandas DataFrame."""
-        rel = self.query(sql_query, params=params)
-        return rel.df()
+        is_valid, errors = self.validate_query_security(sql_query)
+        if not is_valid:
+            raise PermissionError(f"Query validation rejected: {'; '.join(errors)}")
+
+        with self._lock:
+            cur = self._con.cursor()
+            if params is not None:
+                rel = cur.execute(sql_query, params)
+            else:
+                rel = cur.execute(sql_query)
+            return rel.df()
 
     def close(self) -> None:
         """Gracefully close the in-process DuckDB session and free memory."""
-        self._source_dataframes.clear()
-        self._con.close()
+        with self._lock:
+            self._source_dataframes.clear()
+            self._table_profiles.clear()
+            self._con.close()

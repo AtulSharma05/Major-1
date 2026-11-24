@@ -198,6 +198,7 @@ def test_timeout_bounded_behavior_when_interruption_fails(execution_engine, monk
     monkeypatch.setattr(execution_engine.db, "_con", StubbornConnectionWrapper())
 
     import threading
+
     before_threads = set(threading.enumerate())
 
     t0 = time.perf_counter()

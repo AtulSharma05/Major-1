@@ -256,8 +256,7 @@ def test_execution_validator_single_row_multi_metric_unexpected_column(engine, v
     """Finding 4: Extra unexpected columns in multi-metric summary must fail schema validation."""
     # Query returns total_sales and total_profit plus an unexpected extra column
     sql = (
-        "SELECT SUM(sales) AS total_sales, SUM(profit) AS total_profit, 1 AS extra "
-        "FROM superstore"
+        "SELECT SUM(sales) AS total_sales, SUM(profit) AS total_profit, 1 AS extra FROM superstore"
     )
     raw_res = engine.execute(sql)
     assert raw_res.success is True

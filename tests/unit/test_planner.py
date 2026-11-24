@@ -166,13 +166,17 @@ def test_compute_execution_order_duplicate_step_ids():
 
 def test_malformed_llm_planner_output_fallback():
     """Verify that malformed LLM responses safely fall back to single-step plan."""
+
     class MockOllamaClient:
         def generate(self, *args, **kwargs):
             return "This is not valid JSON at all! Just random commentary."
 
+    from src.agent.data.profiling import TableProfile
+
     planner = QueryPlanner(client=MockOllamaClient())
-    question = "Compare 2016 vs 2017 sales"
-    plan = planner.plan(question, active_table="superstore")
+    dummy_profile = TableProfile(table_name="superstore", row_count=10, column_count=1, columns={})
+    question = "Provide a multi-stage breakdown of transactions across regional customer groups"
+    plan = planner.plan(question, active_table="superstore", profile=dummy_profile)
 
     # Should gracefully fall back to a 1-step plan rather than crashing
     assert plan.is_multi_step is False

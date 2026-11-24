@@ -61,4 +61,3 @@ def test_query_specification_filters_and_time():
     deserialized = QuerySpecification.model_validate_json(json_str)
     assert deserialized.table_name == "superstore"
     assert deserialized.time_constraints[0].is_half_open is True
-

@@ -67,10 +67,12 @@ def test_profile_table_retail_with_nulls(populated_db):
 def test_profile_table_all_nulls():
     """Verify column profiling when an entire column consists of NULL values."""
     db = SessionDatabase()
-    df = pd.DataFrame({
-        "all_nulls": [None, None, None],
-        "category": ["A", "B", "C"],
-    })
+    df = pd.DataFrame(
+        {
+            "all_nulls": [None, None, None],
+            "category": ["A", "B", "C"],
+        }
+    )
     db.register_dataframe(df, "edge_case")
     profile = profile_table(db, "edge_case")
 
@@ -145,13 +147,15 @@ def test_column_profile_with_temporal_fields():
 def test_profile_temporal_column_metadata():
     """Verify profiling a table with date columns correctly populates date metadata."""
     db = SessionDatabase()
-    df = pd.DataFrame({
-        "id": [1, 2, 3],
-        "dt": [pd.Timestamp("2017-01-01").date(), pd.Timestamp("2017-06-15").date(), None],
-        "ts": [pd.Timestamp("2017-01-01 00:00:00"), pd.Timestamp("2017-06-15 12:00:00"), None],
-        "dmy": ["15/01/2017", "28/06/2017", "10/02/2018"],
-        "region": ["East", "West", "Central"],
-    })
+    df = pd.DataFrame(
+        {
+            "id": [1, 2, 3],
+            "dt": [pd.Timestamp("2017-01-01").date(), pd.Timestamp("2017-06-15").date(), None],
+            "ts": [pd.Timestamp("2017-01-01 00:00:00"), pd.Timestamp("2017-06-15 12:00:00"), None],
+            "dmy": ["15/01/2017", "28/06/2017", "10/02/2018"],
+            "region": ["East", "West", "Central"],
+        }
+    )
     db.register_dataframe(df, "test_dates")
     profile = profile_table(db, "test_dates")
 
@@ -195,8 +199,7 @@ def test_ui_facing_profiling_accesses_date_format(populated_db):
 
     # Verify UI comprehension in src/ui/app.py:482 executes safely
     ambig_cols = [
-        c.name for c in profile.columns.values()
-        if c.date_format and "AMBIGUOUS" in c.date_format
+        c.name for c in profile.columns.values() if c.date_format and "AMBIGUOUS" in c.date_format
     ]
     assert isinstance(ambig_cols, list)
 
@@ -204,4 +207,3 @@ def test_ui_facing_profiling_accesses_date_format(populated_db):
     display_df = profile_to_display_df(profile)
     assert "Date Format" in display_df.columns
     assert len(display_df) == len(profile.columns)
-

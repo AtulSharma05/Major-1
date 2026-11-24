@@ -1,2 +1,1 @@
 """Offline unit tests package."""
-

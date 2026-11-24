@@ -8,4 +8,3 @@ __all__ = [
     "OllamaClient",
     "build_sql_prompt",
 ]
-

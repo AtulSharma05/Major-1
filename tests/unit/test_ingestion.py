@@ -67,10 +67,12 @@ def test_read_csv_with_fallback(tmp_path):
 def test_session_database_dataframe_registration():
     """Verify DataFrame registration with automatic column sanitization and collision handling."""
     db = SessionDatabase()
-    df = pd.DataFrame({
-        "Customer Name": ["Alice", "Bob"],
-        "Order-Total": [100.5, 200.0],
-    })
+    df = pd.DataFrame(
+        {
+            "Customer Name": ["Alice", "Bob"],
+            "Order-Total": [100.5, 200.0],
+        }
+    )
     table_name = db.register_dataframe(df, "Customer Orders")
     assert table_name == "customer_orders"
     assert db.is_table_allowed("customer_orders")

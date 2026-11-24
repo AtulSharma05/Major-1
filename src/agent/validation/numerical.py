@@ -38,6 +38,7 @@ from src.agent.planning.intent import (
     AggregationType,
     FilterSpec,
     QuerySpecification,
+    SortDirection,
     TimeConstraint,
 )
 from src.agent.planning.planner import PlanStep
@@ -385,9 +386,59 @@ class IndependentCalculator:
 
             # Three-valued logic: rows with null in filter column are excluded by WHERE
             valid_mask = filtered[col].notna()
+            series_non_null = filtered.loc[valid_mask, col]
+
+            # Detect whether column is temporal or contains date values
+            is_col_temporal = pd.api.types.is_datetime64_any_dtype(filtered[col])
+            col_prof = None
+            if table_profile and table_profile.columns:
+                col_prof = table_profile.columns.get(col)
+                if not col_prof:
+                    for cp_name, cp in table_profile.columns.items():
+                        if cp_name.lower() == col.lower():
+                            col_prof = cp
+                            break
+            if col_prof and col_prof.is_temporal:
+                is_col_temporal = True
+
+            if (
+                not is_col_temporal
+                and len(series_non_null) > 0
+                and op in ("=", "!=", ">", "<", ">=", "<=")
+            ):
+                first_elem = series_non_null.iloc[0]
+                if isinstance(first_elem, (datetime.date, datetime.datetime, pd.Timestamp)):
+                    is_col_temporal = True
+                elif isinstance(val, (datetime.date, datetime.datetime, pd.Timestamp)):
+                    is_col_temporal = True
+                elif isinstance(val, str) and re.match(r"^\d{4}-\d{2}-\d{2}", val):
+                    is_col_temporal = True
 
             try:
-                if op == "=":
+                if is_col_temporal and op in ("=", "!=", ">", "<", ">=", "<="):
+                    strp_fmt = col_prof.strptime_format if col_prof else None
+                    if strp_fmt:
+                        col_dt = pd.to_datetime(filtered[col], format=strp_fmt, errors="coerce")
+                        if col_dt.isna().all() and len(series_non_null) > 0:
+                            col_dt = pd.to_datetime(filtered[col], errors="coerce")
+                    else:
+                        col_dt = pd.to_datetime(filtered[col], errors="coerce")
+                    val_dt = pd.to_datetime(val)
+                    dt_valid = valid_mask & col_dt.notna()
+
+                    if op == "=":
+                        mask = dt_valid & (col_dt == val_dt)
+                    elif op == "!=":
+                        mask = dt_valid & (col_dt != val_dt)
+                    elif op == ">":
+                        mask = dt_valid & (col_dt > val_dt)
+                    elif op == "<":
+                        mask = dt_valid & (col_dt < val_dt)
+                    elif op == ">=":
+                        mask = dt_valid & (col_dt >= val_dt)
+                    elif op == "<=":
+                        mask = dt_valid & (col_dt <= val_dt)
+                elif op == "=":
                     mask = valid_mask & (filtered[col] == val)
                 elif op == "!=":
                     mask = valid_mask & (filtered[col] != val)
@@ -464,12 +515,10 @@ class IndependentCalculator:
 
                     if strp_fmt:
                         col_series = pd.to_datetime(filtered[col], format=strp_fmt, errors="coerce")
+                        if col_series.isna().all() and len(series_non_null) > 0:
+                            col_series = pd.to_datetime(filtered[col], errors="coerce")
                     else:
-                        return (
-                            None,
-                            f"Ambiguous or undetermined date format in column '{col}'; "
-                            "date interpretation cannot be established",
-                        )
+                        col_series = pd.to_datetime(filtered[col], errors="coerce")
 
                 if tc.start_time:
                     start_dt = pd.to_datetime(tc.start_time)
@@ -763,6 +812,80 @@ class IndependentCalculator:
                         return None, f"Formula evaluation error in group: {exc}"
 
             grouped_rows.append(row_dict)
+
+        # Apply sorting and limit if specified (e.g. Top-N ranking queries)
+        if spec.limit is not None or spec.ranking_spec is not None or spec.order_by:
+            sort_metric: str | None = None
+            sort_desc: bool = True
+            sec_sort_specs: list[tuple[str, bool]] = []
+
+            if spec.ranking_spec and spec.ranking_spec.metric:
+                m_obj = spec.ranking_spec.metric
+                sort_metric = m_obj.name if hasattr(m_obj, "name") else str(m_obj)
+                sort_desc = spec.ranking_spec.direction == SortDirection.DESC
+                if spec.ranking_spec.secondary_keys:
+                    for sk in spec.ranking_spec.secondary_keys:
+                        sk_desc = sk.direction == SortDirection.DESC
+                        sec_sort_specs.append((sk.column, sk_desc))
+            elif spec.order_by:
+                first_order = spec.order_by[0].strip()
+                parts = first_order.split()
+                sort_metric = parts[0]
+                sort_desc = not (len(parts) > 1 and parts[1].upper() == "ASC")
+
+            # Incorporate any remaining clauses from spec.order_by
+            if spec.order_by and len(spec.order_by) > 1:
+                existing_cols = {col.lower() for col, _ in sec_sort_specs}
+                if sort_metric:
+                    existing_cols.add(sort_metric.lower())
+                for ob in spec.order_by[1:]:
+                    parts = ob.strip().split()
+                    c_name = parts[0]
+                    c_desc = len(parts) > 1 and parts[1].upper() == "DESC"
+                    if c_name.lower() not in existing_cols:
+                        sec_sort_specs.append((c_name, c_desc))
+                        existing_cols.add(c_name.lower())
+
+            # For grouped Top-N queries, ensure all grouping dimensions act as
+            # deterministic tie-breakers
+            if spec.dimensions:
+                existing_cols = {col.lower() for col, _ in sec_sort_specs}
+                if sort_metric:
+                    existing_cols.add(sort_metric.lower())
+                for d in spec.dimensions:
+                    if d.lower() not in existing_cols:
+                        sec_sort_specs.append((d, False))  # ASC
+                        existing_cols.add(d.lower())
+
+            if sort_metric:
+                # Combine primary and secondary sort specifications
+                all_sort_specs = [(sort_metric, sort_desc)] + sec_sort_specs
+
+                # Stable sort in reverse order of precedence
+                for col_name, c_desc in reversed(all_sort_specs):
+
+                    def _make_key_func(target_c: str, is_d: bool):
+                        def _get_sort_val(r: dict[str, Any]) -> tuple[int, float, str]:
+                            for k, v in r.items():
+                                if k.lower() == target_c.lower():
+                                    if v is None or is_scalar_null(v):
+                                        return (-1 if is_d else 1, 0.0, "")
+                                    if isinstance(v, (int, float, Decimal)) and not isinstance(
+                                        v, bool
+                                    ):
+                                        return (0, float(v), "")
+                                    return (0, 0.0, str(v))
+                            return (-1 if is_d else 1, 0.0, "")
+
+                        return _get_sort_val
+
+                    grouped_rows.sort(key=_make_key_func(col_name, c_desc), reverse=c_desc)
+
+            if spec.limit is not None:
+                if not sort_metric:
+                    # LIMIT without deterministic sort order -> fail-closed/inconclusive
+                    return None, "limit_without_order_inconclusive"
+                grouped_rows = grouped_rows[: spec.limit]
 
         return grouped_rows, None
 

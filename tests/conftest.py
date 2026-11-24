@@ -21,4 +21,3 @@ def repo_root() -> Path:
 def data_dir(repo_root: Path) -> Path:
     """Return the path to the data directory."""
     return repo_root / "data"
-

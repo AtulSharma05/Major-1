@@ -387,18 +387,20 @@ class ExecutionValidator:
         Returns:
             Tuple of (route_target, blocking_reason).
         """
-        # Rule 1: Execution or numerical validation failure
+        # Rule 1: Execution, numerical, or semantic validation failure
         if (
             step_validation.status == ValidationStatus.FAILED
             or not step_validation.execution_result.passed
             or step_validation.execution_result.status == ValidationStatus.FAILED
             or step_validation.numerical_result.status == ValidationStatus.FAILED
+            or step_validation.semantic_result.status == ValidationStatus.FAILED
         ):
-            err_msg = (
-                step_validation.numerical_result.message
-                if step_validation.numerical_result.status == ValidationStatus.FAILED
-                else (step_validation.execution_result.message or "Step validation failed")
-            )
+            if step_validation.semantic_result.status == ValidationStatus.FAILED:
+                err_msg = step_validation.semantic_result.message or "Semantic validation failed"
+            elif step_validation.numerical_result.status == ValidationStatus.FAILED:
+                err_msg = step_validation.numerical_result.message or "Numerical validation failed"
+            else:
+                err_msg = step_validation.execution_result.message or "Step validation failed"
             return "error_analyzer", err_msg
 
         is_final_step = (plan is None) or (current_step_index + 1 >= len(plan.execution_order))

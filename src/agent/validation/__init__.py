@@ -6,12 +6,14 @@ Architectural Context (ADR-02, ADR-03, Master Execution Plan Phase 5):
 """
 
 from src.agent.validation.contracts import (
+    CANONICAL_SEMANTIC_CHECKS,
     ConfidenceLevel,
     CorrectionDiagnostic,
     ErrorCategory,
     ExecutionValidationResult,
     LayerValidationResult,
     NumericalValidationResult,
+    SemanticCheckDetail,
     SemanticValidationResult,
     StepValidationResult,
     ValidationStatus,
@@ -30,10 +32,23 @@ from src.agent.validation.numerical import (
     is_scalar_null,
     match_group_key_element,
 )
+from src.agent.validation.projection import (
+    SUPPORTED_SCALAR_TYPES,
+    CanonicalProjectionView,
+    ProjectionNormalizationResult,
+    ProjectionNormalizationStatus,
+    ProjectionNormalizer,
+)
+from src.agent.validation.semantic import (
+    SemanticValidator,
+    resolve_semantic_validation_status,
+)
 
 __all__ = [
     "CANONICAL_FLOAT_NAN",
+    "CANONICAL_SEMANTIC_CHECKS",
     "CANONICAL_SQL_NULL",
+    "CanonicalProjectionView",
     "ConfidenceLevel",
     "CorrectionDiagnostic",
     "ErrorCategory",
@@ -43,8 +58,14 @@ __all__ = [
     "LayerValidationResult",
     "NumericalValidationResult",
     "NumericalValidator",
+    "ProjectionNormalizationResult",
+    "ProjectionNormalizationStatus",
+    "ProjectionNormalizer",
+    "SUPPORTED_SCALAR_TYPES",
     "SafeFormulaEvaluator",
+    "SemanticCheckDetail",
     "SemanticValidationResult",
+    "SemanticValidator",
     "StepValidationResult",
     "ValidationStatus",
     "WorkflowValidationReport",
@@ -53,4 +74,5 @@ __all__ = [
     "determine_step_status",
     "is_scalar_null",
     "match_group_key_element",
+    "resolve_semantic_validation_status",
 ]

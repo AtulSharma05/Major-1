@@ -1127,7 +1127,11 @@ def test_regression_workflow_retry_and_step_counts_consistency():
     # Step 1 Attempt 1
     report.add_step_attempt(
         build_step_validation_result(
-            1, 1, _make_l1(), _make_l2(passed=False, status=ValidationStatus.FAILED), _make_l3(),
+            1,
+            1,
+            _make_l1(),
+            _make_l2(passed=False, status=ValidationStatus.FAILED),
+            _make_l3(),
             raw_execution_result=raw_ok,
         )
     )
@@ -1137,7 +1141,11 @@ def test_regression_workflow_retry_and_step_counts_consistency():
     # Step 1 Attempt 2 (Retry 1 for Step 1)
     report.add_step_attempt(
         build_step_validation_result(
-            1, 2, _make_l1(), _make_l2(passed=True, status=ValidationStatus.VERIFIED), _make_l3(),
+            1,
+            2,
+            _make_l1(),
+            _make_l2(passed=True, status=ValidationStatus.VERIFIED),
+            _make_l3(),
             raw_execution_result=raw_ok,
         )
     )
@@ -1147,7 +1155,11 @@ def test_regression_workflow_retry_and_step_counts_consistency():
     # Step 2 Attempt 1
     report.add_step_attempt(
         build_step_validation_result(
-            2, 1, _make_l1(), _make_l2(passed=False, status=ValidationStatus.FAILED), _make_l3(),
+            2,
+            1,
+            _make_l1(),
+            _make_l2(passed=False, status=ValidationStatus.FAILED),
+            _make_l3(),
             raw_execution_result=raw_ok,
         )
     )
@@ -1157,7 +1169,11 @@ def test_regression_workflow_retry_and_step_counts_consistency():
     # Step 2 Attempt 2 (Retry 1 for Step 2)
     report.add_step_attempt(
         build_step_validation_result(
-            2, 2, _make_l1(), _make_l2(passed=False, status=ValidationStatus.FAILED), _make_l3(),
+            2,
+            2,
+            _make_l1(),
+            _make_l2(passed=False, status=ValidationStatus.FAILED),
+            _make_l3(),
             raw_execution_result=raw_ok,
         )
     )
@@ -1167,7 +1183,11 @@ def test_regression_workflow_retry_and_step_counts_consistency():
     # Step 2 Attempt 3 (Retry 2 for Step 2)
     report.add_step_attempt(
         build_step_validation_result(
-            2, 3, _make_l1(), _make_l2(passed=True, status=ValidationStatus.VERIFIED), _make_l3(),
+            2,
+            3,
+            _make_l1(),
+            _make_l2(passed=True, status=ValidationStatus.VERIFIED),
+            _make_l3(),
             raw_execution_result=raw_ok,
         )
     )

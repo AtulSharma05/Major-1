@@ -137,12 +137,14 @@ def test_end_to_end_unresolvable_intent_safe_inconclusive(superstore_context):
     mock_gen = MockCodeGenerator({unresolvable_question: mock_sql})
     graph = build_analytical_graph(db=db, generator=mock_gen, planner=planner)
 
-    final_state = graph.invoke({
-        "question": unresolvable_question,
-        "session_id": "test_e2e_ambiguous",
-        "active_table": "superstore",
-        "schema_profile": profile,
-    })
+    final_state = graph.invoke(
+        {
+            "question": unresolvable_question,
+            "session_id": "test_e2e_ambiguous",
+            "active_table": "superstore",
+            "schema_profile": profile,
+        }
+    )
 
     assert final_state["status"] == "inconclusive"
     val_report = final_state["validation_report"]
@@ -162,12 +164,14 @@ def test_end_to_end_live_ollama_qwen_execution(ollama_available, superstore_cont
     generator = CodeGenerator(client=client)
     graph = build_analytical_graph(db=db, generator=generator, planner=planner)
 
-    final_state = graph.invoke({
-        "question": question,
-        "session_id": "test_e2e_ollama_live",
-        "active_table": "superstore",
-        "schema_profile": profile,
-    })
+    final_state = graph.invoke(
+        {
+            "question": question,
+            "session_id": "test_e2e_ollama_live",
+            "active_table": "superstore",
+            "schema_profile": profile,
+        }
+    )
 
     val_report = final_state.get("validation_report")
     assert val_report is not None

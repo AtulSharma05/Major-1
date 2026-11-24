@@ -73,14 +73,16 @@ def test_detect_date_format_and_pattern_variations():
 def test_date_column_profiling_and_identification():
     """Verify profiling identifies column types and formats across an external dataset."""
     db = SessionDatabase()
-    df = pd.DataFrame({
-        "id": [1, 2, 3, 4],
-        "date_iso": ["2017-01-15", "2017-06-20", "2018-02-10", None],
-        "date_dmy": ["15/01/2017", "28/06/2017", "10/02/2018", None],
-        "date_ambig": ["01/02/2017", "03/04/2017", "05/06/2018", None],
-        "category": ["A", "B", "C", "D"],
-        "sales": [100.0, 200.0, 300.0, 400.0],
-    })
+    df = pd.DataFrame(
+        {
+            "id": [1, 2, 3, 4],
+            "date_iso": ["2017-01-15", "2017-06-20", "2018-02-10", None],
+            "date_dmy": ["15/01/2017", "28/06/2017", "10/02/2018", None],
+            "date_ambig": ["01/02/2017", "03/04/2017", "05/06/2018", None],
+            "category": ["A", "B", "C", "D"],
+            "sales": [100.0, 200.0, 300.0, 400.0],
+        }
+    )
     db.register_dataframe(df, "ext_sales")
     profile = profile_table(db, "ext_sales")
 
@@ -115,18 +117,20 @@ def test_date_column_profiling_and_identification():
 def test_native_date_column_query_execution():
     """Verify execution on genuine DuckDB DATE column with half-open intervals and nulls."""
     db = SessionDatabase()
-    df = pd.DataFrame({
-        "id": [1, 2, 3, 4, 5, 6],
-        "event_date": [
-            pd.Timestamp("2016-12-31").date(),
-            pd.Timestamp("2017-01-01").date(),
-            pd.Timestamp("2017-06-15").date(),
-            pd.Timestamp("2017-12-31").date(),
-            pd.Timestamp("2018-01-01").date(),
-            None,
-        ],
-        "revenue": [50.0, 100.0, 250.0, 150.0, 300.0, 500.0],
-    })
+    df = pd.DataFrame(
+        {
+            "id": [1, 2, 3, 4, 5, 6],
+            "event_date": [
+                pd.Timestamp("2016-12-31").date(),
+                pd.Timestamp("2017-01-01").date(),
+                pd.Timestamp("2017-06-15").date(),
+                pd.Timestamp("2017-12-31").date(),
+                pd.Timestamp("2018-01-01").date(),
+                None,
+            ],
+            "revenue": [50.0, 100.0, 250.0, 150.0, 300.0, 500.0],
+        }
+    )
     db.register_dataframe(df, "sales_native_date")
 
     engine = ControlledExecutionEngine(db=db)
@@ -152,16 +156,18 @@ def test_native_date_column_query_execution():
 def test_timestamp_boundary_handling():
     """Verify half-open interval captures 23:59:59 timestamps while BETWEEN loses them."""
     db = SessionDatabase()
-    df = pd.DataFrame({
-        "order_id": [1, 2, 3, 4],
-        "order_time": [
-            pd.Timestamp("2017-01-01 00:00:00"),
-            pd.Timestamp("2017-06-15 14:30:00"),
-            pd.Timestamp("2017-12-31 23:59:59"),
-            pd.Timestamp("2018-01-01 00:00:00"),
-        ],
-        "amount": [100.0, 200.0, 300.0, 400.0],
-    })
+    df = pd.DataFrame(
+        {
+            "order_id": [1, 2, 3, 4],
+            "order_time": [
+                pd.Timestamp("2017-01-01 00:00:00"),
+                pd.Timestamp("2017-06-15 14:30:00"),
+                pd.Timestamp("2017-12-31 23:59:59"),
+                pd.Timestamp("2018-01-01 00:00:00"),
+            ],
+            "amount": [100.0, 200.0, 300.0, 400.0],
+        }
+    )
     db.register_dataframe(df, "sales_timestamp")
 
     engine = ControlledExecutionEngine(db=db)
@@ -195,11 +201,13 @@ def test_timestamp_boundary_handling():
 def test_varchar_dmy_dates_query_execution():
     """Verify VARCHAR DD/MM/YYYY columns work correctly with try_strptime and fail with ASCII."""
     db = SessionDatabase()
-    df = pd.DataFrame({
-        "id": [1, 2, 3, 4],
-        "trans_date": ["15/06/2017", "28/11/2016", "05/01/2018", None],
-        "profit": [250.0, 150.0, 300.0, 50.0],
-    })
+    df = pd.DataFrame(
+        {
+            "id": [1, 2, 3, 4],
+            "trans_date": ["15/06/2017", "28/11/2016", "05/01/2018", None],
+            "profit": [250.0, 150.0, 300.0, 50.0],
+        }
+    )
     db.register_dataframe(df, "sales_dmy")
 
     engine = ControlledExecutionEngine(db=db)
@@ -235,10 +243,12 @@ def test_varchar_dmy_dates_query_execution():
 def test_ambiguous_date_format_surfacing():
     """Verify that ambiguous date formats are flagged and not silently assumed."""
     db = SessionDatabase()
-    df = pd.DataFrame({
-        "order_date": ["01/02/2017", "03/04/2017", "05/06/2017"],
-        "sales": [10.0, 20.0, 30.0],
-    })
+    df = pd.DataFrame(
+        {
+            "order_date": ["01/02/2017", "03/04/2017", "05/06/2017"],
+            "sales": [10.0, 20.0, 30.0],
+        }
+    )
     db.register_dataframe(df, "ambig_data")
 
     profile = profile_table(db, "ambig_data")
@@ -262,10 +272,12 @@ def test_ambiguous_date_format_surfacing():
 def test_build_sql_prompt_preserves_time_constraints():
     """Verify that QuerySpecification time_constraints are serialized into the LLM prompt."""
     db = SessionDatabase()
-    df = pd.DataFrame({
-        "order_date": ["2017-01-01", "2017-06-01"],
-        "sales": [100.0, 200.0],
-    })
+    df = pd.DataFrame(
+        {
+            "order_date": ["2017-01-01", "2017-06-01"],
+            "sales": [100.0, 200.0],
+        }
+    )
     db.register_dataframe(df, "orders")
     profile = profile_table(db, "orders")
 

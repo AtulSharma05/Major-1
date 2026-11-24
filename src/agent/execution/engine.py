@@ -103,7 +103,7 @@ class ControlledExecutionEngine:
         # 6. We join the worker thread with a bounded grace period (0.2s) and call
         #    executor.shutdown(wait=False, cancel_futures=True), strictly guaranteeing
         #    bounded caller return within timeout + 0.2s.
-        cursor = self.db.connection.cursor()
+        cursor = self.db.cursor() if hasattr(self.db, "cursor") else self.db.connection.cursor()
 
         def _run_query():
             rel = cursor.sql(clean_query)

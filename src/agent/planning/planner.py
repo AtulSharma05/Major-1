@@ -292,17 +292,19 @@ class QueryPlanner:
                 # Fall back to heuristic decomposition or single-step plan
                 pass
 
-        # Step 3: Heuristic multi-step decomposition for independent rankings
+        # Step 3: Heuristic multi-step decomposition for independent rankings or comparisons
         heuristic_plan = self._detect_independent_rankings(clean_question, active_table, profile)
         if heuristic_plan:
             return heuristic_plan
 
+        comparison_plan = self._detect_period_comparisons(clean_question, active_table, profile)
+        if comparison_plan:
+            return comparison_plan
+
         # Step 4: Default fallback: treat as single-step plan
         step_prof = self._resolve_table_profile(active_table, profile)
         intent = (
-            self.intent_parser.parse(clean_question, active_table, step_prof)
-            if step_prof
-            else None
+            self.intent_parser.parse(clean_question, active_table, step_prof) if step_prof else None
         )
         step = PlanStep(
             step_id=1,
@@ -345,8 +347,8 @@ class QueryPlanner:
 
         # Multiple ranking superlatives with conjunctions (e.g. "highest sales ... highest profit")
         superlatives = ["highest", "lowest", "top", "bottom", "most", "least", "best", "worst"]
-        found_sup = [s for s in superlatives if s in q_lower]
-        if len(found_sup) >= 2 and (" and " in q_lower or " as well as " in q_lower):
+        total_sup_count = sum(q_lower.count(s) for s in superlatives)
+        if total_sup_count >= 2 and (" and " in q_lower or " as well as " in q_lower):
             return False
 
         return True
@@ -411,6 +413,58 @@ class QueryPlanner:
             is_multi_step=True,
         )
 
+    def _detect_period_comparisons(
+        self,
+        question: str,
+        active_table: str,
+        profile: TableProfile | None = None,
+    ) -> AnalyticalPlan | None:
+        """Decompose questions comparing two time periods or years into discrete atomic steps."""
+        q_lower = question.lower()
+        triggers = ["compare", " vs ", "versus", "growth between", "difference between"]
+        if not any(k in q_lower for k in triggers):
+            return None
+
+        years = re.findall(r"\b(19\d\d|20\d\d)\b", question)
+        if len(years) < 2:
+            return None
+
+        y1, y2 = years[0], years[1]
+        metric_phrase = "total sales"
+        if "profit" in q_lower:
+            metric_phrase = "total profit"
+        elif "sales" in q_lower:
+            metric_phrase = "total sales"
+        elif "quantity" in q_lower:
+            metric_phrase = "total quantity"
+
+        q1 = f"What was {metric_phrase} in {y1}?"
+        q2 = f"What was {metric_phrase} in {y2}?"
+
+        step1_intent = self.intent_parser.parse(q1, active_table, profile) if profile else None
+        step2_intent = self.intent_parser.parse(q2, active_table, profile) if profile else None
+
+        step1 = PlanStep(
+            step_id=1,
+            question=q1,
+            target_table=active_table,
+            structured_intent=step1_intent,
+            depends_on=[],
+        )
+        step2 = PlanStep(
+            step_id=2,
+            question=q2,
+            target_table=active_table,
+            structured_intent=step2_intent,
+            depends_on=[],
+        )
+        return AnalyticalPlan(
+            original_question=question,
+            steps=[step1, step2],
+            execution_order=[1, 2],
+            is_multi_step=True,
+        )
+
     def _plan_with_llm(
         self,
         question: str,
@@ -444,9 +498,7 @@ class QueryPlanner:
             step_prof = self._resolve_table_profile(step_target, profile)
             step_q = str(s.get("question", question))
             step_intent = (
-                self.intent_parser.parse(step_q, step_target, step_prof)
-                if step_prof
-                else None
+                self.intent_parser.parse(step_q, step_target, step_prof) if step_prof else None
             )
             steps.append(
                 PlanStep(

@@ -158,8 +158,9 @@ def test_workflow_error_routing_structural_boundary(workflow_setup):
 
     final_state = graph.invoke(initial_state)
 
-    # In Phase 4, error Analyzer & Corrector act as structural placeholders
-    assert final_state["status"] == "correction_deferred_to_phase_5"
+    # In Stage 5, persistent failure exhausts retries and terminates as validation_failed
+    assert final_state["status"] == "validation_failed"
+    assert final_state["retry_count"] == 2
     assert final_state["execution_result"].success is False
     assert final_state["execution_result"].error_type == "ColumnError"
     assert final_state["error_feedback"] is not None

@@ -39,6 +39,11 @@ class AssembledResult(BaseModel):
     summary_metrics: dict[str, Any] = Field(default_factory=dict)
     assembly_notes: list[str] = Field(default_factory=list)
 
+    @property
+    def step_outputs(self) -> dict[int, ExecutionResult]:
+        """Backward-compatibility property alias returning step_results."""
+        return self.step_results
+
 
 class ResultAssembler:
     """Combines intermediate execution step results into an AssembledResult."""
@@ -57,9 +62,9 @@ class ResultAssembler:
         Returns:
             AssembledResult containing consolidated data and summary metrics.
         """
-        all_succeeded = all(
-            r.success for r in step_results.values()
-        ) and len(step_results) == len(plan.steps)
+        all_succeeded = all(r.success for r in step_results.values()) and len(step_results) == len(
+            plan.steps
+        )
 
         # Case 1: Single-Step Plan (Pass-Through)
         if not plan.is_multi_step:
@@ -182,18 +187,14 @@ class ResultAssembler:
                 suffix_0 = f"_{step_obj_0.step_id}" if step_obj_0 else "_1"
 
                 # Rename non-key columns with step suffixes
-                rename_map_0 = {
-                    c: f"{c}{suffix_0}" for c in merged_df.columns if c != key
-                }
+                rename_map_0 = {c: f"{c}{suffix_0}" for c in merged_df.columns if c != key}
                 merged_df = merged_df.rename(columns=rename_map_0)
 
                 for s_id, next_df in tabular_steps[1:]:
                     step_obj = plan.get_step(s_id)
                     suffix = f"_{step_obj.step_id}" if step_obj else f"_{s_id}"
                     df_copy = next_df.copy()
-                    rename_map = {
-                        c: f"{c}{suffix}" for c in df_copy.columns if c != key
-                    }
+                    rename_map = {c: f"{c}{suffix}" for c in df_copy.columns if c != key}
                     df_copy = df_copy.rename(columns=rename_map)
                     merged_df = pd.merge(merged_df, df_copy, on=key, how="outer")
 
@@ -214,12 +215,14 @@ class ResultAssembler:
                         num_cols = [c for c in df.columns if c not in cat_cols]
                         ent_val = str(first_row[cat_cols[0]]) if cat_cols else "N/A"
                         met_val = first_row[num_cols[0]] if num_cols else "N/A"
-                        ranking_rows.append({
-                            "step_id": s_id,
-                            "objective": s_goal,
-                            "top_entity": ent_val,
-                            "value": met_val,
-                        })
+                        ranking_rows.append(
+                            {
+                                "step_id": s_id,
+                                "objective": s_goal,
+                                "top_entity": ent_val,
+                                "value": met_val,
+                            }
+                        )
                 merged_df = pd.DataFrame(ranking_rows)
                 notes.append("Independent ranking results assembled.")
 
